@@ -1,0 +1,88 @@
+import {chromium} from '@playwright/test';
+import assert from 'node:assert/strict';
+import {readFile, mkdir} from 'node:fs/promises';
+const url = process.env.REVIEW_URL || 'http://127.0.0.1:8000/';
+const browser = await chromium.launch({headless: true, args: ['--no-sandbox']});
+const page = await browser.newPage({viewport: {width: 1440, height: 1000}, acceptDownloads: true});
+const errors = [];
+page.on('pageerror', e => errors.push(e.message));
+try {
+  await page.goto(url);
+  await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('/ 500'));
+  const manifest = await page.evaluate(async () => (await fetch('./data/manifest.json')).json());
+  const group = Array.from({length: 20}, (_, i) => i * 25).find(start => manifest.items.slice(start, start + 25).every(item => item.candidates));
+  assert.notEqual(group, undefined, 'Browser export test requires one complete group of real candidates');
+  const range = group + '-' + (group + 24);
+  const filename = String(group).padStart(3, '0') + '_' + String(group + 24).padStart(3, '0') + '.jsonl';
+  await page.locator('#range').fill(range);
+  await page.locator('#apply-range').click();
+  await page.locator('[data-choice="neither"]').click();
+  await page.locator('#save').click();
+  assert.match(await page.locator('#message').textContent(), /至少选择一个/);
+  await page.locator('[value="color"]').check();
+  await page.locator('[value="pose"]').check();
+  await page.locator('#save').click();
+  assert.match(await page.locator('#progress').textContent(), /1 \/ 500/);
+  const partialDownload = page.waitForEvent('download');
+  await page.locator('#export-now').click();
+  const partial = await partialDownload;
+  assert.equal(partial.suggestedFilename(), filename);
+  const partialText = await readFile(await partial.path(), 'utf8');
+  const first = JSON.parse(partialText);
+  assert.equal(first.accepted, 'neither');
+  assert.deepEqual(first.rejection_reasons, ['color', 'pose']);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('1 / 500'));
+  let completed;
+  for (let i = 1; i < 25; i++) {
+    await page.locator('[data-choice="a"]').click();
+    if (i === 24) completed = page.waitForEvent('download');
+    await page.locator('#save').click();
+  }
+  const automatic = await completed;
+  assert.equal(automatic.suggestedFilename(), filename);
+  const lines = (await readFile(await automatic.path(), 'utf8')).trim().split('\n');
+  assert.equal(lines.length, 25);
+  assert.deepEqual(lines.map(line => JSON.parse(line).image_number), Array.from({length: 25}, (_, i) => group + i));
+  assert.match(await page.locator('#message').textContent(), /25 张已完成/);
+  await page.locator('#filter').selectOption('all');
+  await page.locator('[data-choice="both"]').click();
+  await page.locator('#preferred').selectOption('b');
+  const amendedDownload = page.waitForEvent('download');
+  await page.locator('#save').click();
+  await amendedDownload;
+  const key = await page.evaluate(() => Object.keys(localStorage).find(k => k.startsWith('cartoon-review:')));
+  const saved = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
+  assert.equal(saved.reviews[String(group).padStart(3, '0')].review_version, 2);
+  // Invalid import is atomic, and a valid file can restore the earlier single review.
+  await page.locator('#import').setInputFiles({name: 'bad.jsonl', mimeType: 'application/x-ndjson', buffer: Buffer.from(JSON.stringify({...first, round_id: 'wrong'}))});
+  await page.waitForFunction(() => document.querySelector('#message').textContent.includes('导入失败'));
+  assert.deepEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key), saved);
+  await page.locator('#import').setInputFiles({name: filename, mimeType: 'application/x-ndjson', buffer: Buffer.from(partialText)});
+  await page.waitForFunction(() => document.querySelector('#message').textContent.includes('已导入'));
+  assert.equal(await page.evaluate(({key, id}) => JSON.parse(localStorage.getItem(key)).reviews[id].accepted, {key, id: first.photo_id}), 'neither');
+  await page.locator('#range').fill('450-474');
+  await page.locator('#apply-range').click();
+  assert.match(await page.locator('#item-title').textContent(), /^450/);
+  const missing = manifest.items.find(item => !item.candidates);
+  if (missing) {
+    const start = Math.min(missing.image_number, 475);
+    await page.locator('#range').fill(start + '-' + (start + 24));
+    await page.locator('#apply-range').click();
+    for (let i = start; i < missing.image_number; i++) await page.locator('#next').click();
+    assert.equal(await page.locator('#save').isDisabled(), true);
+    assert.equal(await page.locator('[data-choice="a"]').isDisabled(), true);
+  }
+  await page.locator('#range').fill(range);
+  await page.locator('#apply-range').click();
+  await page.waitForFunction(() => [...document.querySelectorAll('.image-box img')].every(img => img.complete && img.naturalWidth > 0));
+  await mkdir('.test-output', {recursive: true});
+  await page.screenshot({path: '.test-output/desktop.png', fullPage: true});
+  await page.setViewportSize({width: 390, height: 844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await page.screenshot({path: '.test-output/mobile.png', fullPage: true});
+  await page.getByRole('link', {name: '操作说明 ↗'}).click();
+  assert.match(await page.locator('h1').textContent(), /标注操作说明/);
+  assert.deepEqual(errors, []);
+  console.log('Browser passed: subpath assets, real images, rejection, save/reload, 25-row automatic export, edits, import validation, pending candidates and mobile layout.');
+} finally { await browser.close(); }

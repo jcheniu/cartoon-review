@@ -1,0 +1,9 @@
+node_modules/
+.test-output/
+__pycache__/
+*.pyc
+*.tmp
+*.sqlite*
+*.jsonl
+.env*
+.DS_Store

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="500 张动物与动漫脸图像的卡通风格候选标注。每组 25 张，自动导出 JSONL。">
+  <title>卡通图像标注 · Cartoon Review</title>
+  <link rel="stylesheet" href="./assets/style.css">
+</head>
+<body>
+<header>
+  <div><span class="eyebrow">CARTOON REVIEW / PUBLIC DATASET</span><h1>卡通图像标注</h1><p>选择卡通风格，同时保持主体不失真。候选为 256×256，等比缩放。</p></div>
+  <div class="header-links"><a href="./guide.html">操作说明 ↗</a><a href="https://github.com/jcheniu/cartoon-review" target="_blank" rel="noopener noreferrer">公开仓库 ↗</a></div>
+</header>
+<main>
+  <p class="storage-note">标注仅保存在当前浏览器，不会上传到服务器。每完成 25 张自动下载 JSONL；请保留下载文件，换设备时可导入恢复。</p>
+  <section class="toolbar">
+    <label>类别<select id="category"><option value="">全部输入</option><option value="animal">动物照片</option><option value="anime">动漫脸</option></select></label>
+    <label>用途<select id="split"><option value="">全部划分</option><option value="train">训练集</option><option value="validation">验证集</option><option value="test">最终测试集</option></select></label>
+    <label>标注状态<select id="filter"><option value="pending">待标注</option><option value="all">全部</option><option value="reviewed">已标注</option></select></label>
+    <div class="count"><strong id="progress">正在读取数据…</strong><span id="dataset"></span></div>
+  </section>
+  <section class="batch-toolbar">
+    <label for="range">图片序号（每组 25 张）<input id="range" type="text" value="0-24" placeholder="0-24 或 450-474" autocomplete="off"></label>
+    <button id="apply-range">应用</button><button id="prev-group">← 上一组</button><button id="next-group">下一组 →</button><span id="batch-progress"></span>
+  </section>
+  <div id="message" role="status" aria-live="polite"></div>
+  <section class="navigation">
+    <div><span id="badge" class="badge">等待数据</span><strong id="item-title">正在加载</strong><span id="position"></span></div>
+    <div><button id="prev" class="quiet">← 上一张</button><button id="next" class="quiet">下一张 →</button></div>
+  </section>
+  <section class="images">
+    <article><div class="card-title"><strong>输入原图</strong><span id="dimensions"></span></div><div class="image-box"><img id="source" alt="输入原图"><span class="placeholder">暂无图像</span></div></article>
+    <article id="card-a"><div class="card-title"><strong>候选 A</strong><span id="strength-a"></span></div><div class="image-box"><img id="a" alt="候选 A"><span class="placeholder">此图候选待生成</span></div></article>
+    <article id="card-b"><div class="card-title"><strong>候选 B</strong><span id="strength-b"></span></div><div class="image-box"><img id="b" alt="候选 B"><span class="placeholder">此图候选待生成</span></div></article>
+  </section>
+  <section class="review">
+    <div class="review-main">
+      <h2>选择卡通风格，同时保持原图主体不失真</h2>
+      <p class="review-rule">卡通化要有清晰轮廓、简洁色块；主体轮廓、五官、姿态和主要颜色应与原图一致。不要因“更卡通”而接受换脸、变形或改色。两张都明显失真时，选“两张都不合格”。</p>
+      <div class="choices" role="group" aria-label="合格候选">
+        <button data-choice="a">仅 A 合格 <kbd>1</kbd></button><button data-choice="b">仅 B 合格 <kbd>2</kbd></button><button data-choice="both">两张都合格 <kbd>3</kbd></button><button data-choice="neither">两张都不合格 <kbd>4</kbd></button>
+      </div>
+      <fieldset id="rejection-reasons" hidden><legend>不合格原因（可多选，至少一项）</legend><label><input type="checkbox" name="rejection-reason" value="color">颜色</label><label><input type="checkbox" name="rejection-reason" value="pose">姿态</label></fieldset>
+      <label id="prefer-label" hidden>两张合格时更偏好<select id="preferred"><option value="a">A</option><option value="b">B</option><option value="tie">相当</option></select></label>
+      <label>目标图描述（英语；请修正颜色、物种或发色等错误）<textarea id="caption" rows="3" maxlength="2000"></textarea></label>
+    </div>
+    <div class="review-side">
+      <label>备注<textarea id="notes" rows="3" maxlength="2000" placeholder="例如：颜色错误、姿态改变、眼睛变形"></textarea></label>
+      <button id="save" class="primary" disabled>保存并下一张 <kbd>Enter</kbd></button>
+      <span id="save-state">选择合格候选后保存</span>
+      <span class="export-hint">本组 25 张标完自动导出，如 000_024.jsonl。浏览器若拦截下载，请点下方按钮。</span>
+      <button id="export-now">导出本组 JSONL</button>
+      <button id="export-all">备份全部已标注 JSONL</button>
+      <label class="import-label">导入 JSONL 恢复标注<input id="import" type="file" accept=".jsonl,application/jsonl,application/x-ndjson"></label>
+      <span class="export-hint">导入会覆盖文件内同一图片的本地标注；其他图片不变。</span>
+    </div>
+  </section>
+  <details class="source-details"><summary>查看输入来源与许可</summary><p id="provenance"></p><a id="source-link" target="_blank" rel="noopener noreferrer">打开来源页面 ↗</a> · <a href="./DATA_LICENSE.md">数据许可说明 ↗</a></details>
+  <section class="snapshot"><h2>数据快照</h2><p id="snapshot"></p><p>候选是待评审的模型输出。新生成的候选由维护者更新到仓库后可见；当前页面不会启动 GPU 生成或训练。</p></section>
+  <footer>250 张真实猫狗照片 + 250 张 CC0 合成动漫脸。固定训练／验证／测试划分；后续训练只能使用训练集中人工通过的目标。代码 MIT；图片许可见逐图来源。</footer>
+</main>
+<noscript>请启用 JavaScript 后使用标注工具。</noscript>
+<script type="module" src="./assets/app.mjs"></script>
+</body>
+</html>
