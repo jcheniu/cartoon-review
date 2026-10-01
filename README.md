@@ -54,7 +54,8 @@ JSONL 保留 a/b/both/neither、偏好、颜色／姿态原因、描述、编号
 
 打开 http://localhost:8000/ 。直接双击 index.html 无法读取数据清单。
 本地副本仍可保存和导出；自动上传默认仅接受生产站点来源。
-接收服务及部署说明见 [server/README.md](server/README.md)。
+固定上传入口为 https://api.asuperstrongfrog.com；网页地址继续使用 GitHub Pages。
+接收服务及部署说明见 [server/README.md](server/README.md)，固定域名维护见 [edge/README.md](edge/README.md)。
 
 刷新生成快照（替换占位内容）：
 

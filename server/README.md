@@ -11,7 +11,10 @@ Use Python 3.10+ and an already authenticated GitHub CLI with repository write a
     python server/run_service.py --data-dir "<persistent-private-directory>" --port 7121
 
 The private directory must be outside the public checkout. The service listens only on 127.0.0.1.
-The supervisor starts an SSH HTTPS tunnel using localhost.run and restarts failed child processes.\nIt publishes changed endpoints in result/round_1/service.json. The frontend refreshes this discovery file after connection failures.\nFor your own stable HTTPS proxy, run server/receiver.py directly instead. Set the HTTPS endpoint and
+The supervisor starts an SSH HTTPS tunnel using localhost.run and restarts failed child processes.
+It publishes changed endpoints in result/round_1/service.json. The Cloudflare Worker at api.asuperstrongfrog.com refreshes this discovery after connection failures.
+The production frontend uses that fixed Worker URL.
+For your own stable HTTPS proxy, run server/receiver.py directly instead. Set the HTTPS endpoint and
 round_id in upload-config.json. The frontend accepts HTTPS endpoints only.
 
 The production CORS origin is https://jcheniu.github.io. For local testing explicitly add, for example,

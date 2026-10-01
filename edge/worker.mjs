@@ -1,10 +1,12 @@
 // Fixed HTTPS entry point. GitHub credentials stay on the private receiver.
 const DISCOVERY = 'https://raw.githubusercontent.com/jcheniu/cartoon-review/main/result/round_1/service.json';
+const FRESH_DISCOVERY = 'https://api.github.com/repos/jcheniu/cartoon-review/contents/result/round_1/service.json';
 const ROUND = 'round-20260930T231132-d69c0f';
 const ORIGIN = 'https://jcheniu.github.io';
 const MAX_BODY = 256 * 1024;
 let cached = null;
 let expires = 0;
+let freshRetryAt = 0;
 
 function headers(origin) {
   const result = {'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Vary': 'Origin'};
@@ -23,18 +25,29 @@ export function validEndpoint(value) {
     return endpoint.origin;
   } catch { return null; }
 }
-export function resetDiscovery() { cached = null; expires = 0; }
+export function resetDiscovery() { cached = null; expires = 0; freshRetryAt = 0; }
 
 async function discover(force = false) {
   if (cached && !force && Date.now() < expires) return cached;
-  const url = DISCOVERY + '?t=' + Math.floor(Date.now() / 15000);
-  const response = await fetch(url, {headers: {'Accept': 'application/json'}, signal: AbortSignal.timeout(8000)});
-  if (!response.ok) throw Error('Discovery unavailable');
+  // Raw GitHub files may retain a retired tunnel URL for several minutes.
+  // Consult the Contents API on transport failure, with a per-isolate cooldown.
+  if (force && Date.now() < freshRetryAt) {
+    if (cached) return cached;
+    throw Error('Discovery retry cooling down');
+  }
+  if (force) freshRetryAt = Date.now() + 60000;
+  const url = force ? FRESH_DISCOVERY : DISCOVERY + '?t=' + Math.floor(Date.now() / 15000);
+  const response = await fetch(url, {
+    headers: {'Accept': force ? 'application/vnd.github.raw+json' : 'application/json',
+      'User-Agent': 'cartoon-review-upload'},
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw Error('Discovery HTTP ' + response.status);
   const config = await response.json();
   const endpoint = config.round_id === ROUND ? validEndpoint(config.endpoint) : null;
   if (!endpoint) throw Error('Invalid receiver discovery');
   cached = endpoint;
-  expires = Date.now() + 30000;
+  expires = Date.now() + (force ? 300000 : 30000);
   return endpoint;
 }
 
@@ -84,6 +97,7 @@ export async function handle(request) {
     catch { return json(413, {error: 'Upload too large'}, origin); }
     if (!body.length) return json(400, {error: 'Empty upload'}, origin);
   }
+  let lastIssue = 'Unavailable';
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const endpoint = await discover(attempt > 0);
@@ -92,15 +106,20 @@ export async function handle(request) {
       if (body) upstreamHeaders['Content-Type'] = 'application/json';
       const upstream = await fetch(endpoint + url.pathname + url.search, {
         method: request.method, headers: upstreamHeaders, body,
-        redirect: 'error', signal: AbortSignal.timeout(5000),
+        redirect: 'manual', signal: AbortSignal.timeout(5000),
       });
-      if ([502, 503, 504, 530].includes(upstream.status)) { await upstream.body?.cancel(); continue; }
+      if (upstream.status >= 300 && upstream.status < 400) {
+        lastIssue = 'Receiver redirect refused';
+        await upstream.body?.cancel(); continue;
+      }
+      if ([502, 503, 504, 530].includes(upstream.status)) { lastIssue = 'Receiver HTTP ' + upstream.status; await upstream.body?.cancel(); continue; }
       if (!(upstream.headers.get('Content-Type') || '').includes('application/json')) {
+        lastIssue = 'Receiver non-JSON HTTP ' + upstream.status;
         await upstream.body?.cancel(); continue;
       }
       return new Response(upstream.body, {status: upstream.status, headers: headers(origin)});
-    } catch { /* Retry discovery and receiver connection without logging browser keys. */ }
+    } catch (error) { lastIssue = String(error?.message || 'Connection failed').slice(0, 160); }
   }
-  return json(503, {error: '上传服务正在重连；标注保留在浏览器，稍后自动重试'}, origin);
+  return json(503, {error: '上传服务正在重连；标注保留在浏览器，稍后自动重试', ...(health ? {reason: lastIssue} : {})}, origin);
 }
 export default {fetch: handle};
