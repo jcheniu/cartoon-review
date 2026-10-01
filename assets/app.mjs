@@ -1,10 +1,11 @@
+import {createUploader} from './upload.mjs';
 import {parseRange, shiftRange} from './ranges.mjs';
 import {pad, rangeName, choiceOf, makeReview, validateImported, rangeRows} from './review.mjs';
 
 const $ = selector => document.querySelector(selector);
 const choices = [...document.querySelectorAll('[data-choice]')];
 const reasonInputs = [...document.querySelectorAll('[name="rejection-reason"]')];
-let storedSnapshot = null;
+let storedSnapshot = null, uploader = null;
 let manifest, storageKey, state, range = {start: 0, end: 24}, visible = [], index = 0, choice = null;
 
 function message(text, error = false) {
@@ -67,10 +68,9 @@ function renderItem() {
   const review = item && hasValidReview(item) ? state.reviews[item.id] : null;
   choice = choiceOf(review);
   $('#caption').value = review?.caption ?? item?.caption ?? '';
-  $('#notes').value = review?.notes || '';
   $('#preferred').value = review?.preferred === 'b' ? 'b' : review?.preferred === 'tie' ? 'tie' : 'a';
   reasonInputs.forEach(input => { input.checked = (review?.rejection_reasons || []).includes(input.value); });
-  $('#caption').disabled = $('#notes').disabled = !item?.candidates;
+  $('#caption').disabled = !item?.candidates;
   $('#badge').textContent = item ? (item.category === 'animal' ? '动物照片' : '动漫脸') : '本组';
   $('#item-title').textContent = item ? pad(item.image_number) + (item.candidates ? '' : ' · 候选待生成') : '当前筛选下没有图片';
   $('#position').textContent = item ? (index + 1) + ' / ' + visible.length : '可切换“全部”或下一组';
@@ -88,7 +88,6 @@ function refresh(preferredId) {
   const members = manifest.items.filter(item => item.image_number >= range.start && item.image_number <= range.end);
   visible = members.filter(item =>
     (!$('#category').value || item.category === $('#category').value) &&
-    (!$('#split').value || item.split === $('#split').value) &&
     ($('#filter').value === 'all' || ($('#filter').value === 'reviewed' ? hasValidReview(item) : !hasValidReview(item))));
   index = Math.max(0, visible.findIndex(item => item.id === preferredId));
   const done = members.filter(hasValidReview).length;
@@ -130,9 +129,10 @@ function save() {
     const review = makeReview(manifest, item, {
       choice, preferred: $('#preferred').value,
       reasons: reasonInputs.filter(input => input.checked).map(input => input.value),
-      caption: $('#caption').value, notes: $('#notes').value,
+      caption: $('#caption').value,
     }, state.reviews[item.id], state.session);
     persist({...state, reviews: {...state.reviews, [item.id]: review}});
+    try { uploader?.enqueue(range); } catch { $('#upload-state').textContent = '本地保存成功；上传队列不可写，请导出本组 JSONL。'; }
     const rows = rangeRows(state.reviews, range);
     let exported = '';
     if (rows.length === 25) {
@@ -155,6 +155,7 @@ async function importFile(event) {
     const merged = {...state.reviews};
     for (const row of rows) merged[row.photo_id] = row;
     persist({...state, reviews: merged});
+    for (const row of rows) { const start = Math.floor(row.image_number / 25) * 25; uploader?.enqueue({start, end: start + 24}); }
     refresh();
     message('已导入并保存 ' + rows.length + ' 条标注。');
   } catch (error) { message('导入失败，原标注未更改：' + error.message, true); }
@@ -186,7 +187,7 @@ async function start() {
     try { range = parseRange(queryRange); $('#range').value = range.start + '-' + range.end; }
     catch { message('链接中的范围无效，已使用 0-24。', true); }
   }
-  for (const id of ['category', 'split', 'filter']) $('#' + id).addEventListener('change', () => refresh());
+  for (const id of ['category', 'filter']) $('#' + id).addEventListener('change', () => refresh());
   choices.forEach(button => button.addEventListener('click', () => choose(button.dataset.choice)));
   $('#save').addEventListener('click', save);
   $('#prev').addEventListener('click', () => { if (index > 0) { index--; renderItem(); } });
@@ -198,10 +199,6 @@ async function start() {
   }
   $('#export-now').addEventListener('click', () => {
     try { download(rangeRows(state.reviews, range), rangeName(range)); message('已发起本组 JSONL 下载。'); }
-    catch (error) { message(error.message, true); }
-  });
-  $('#export-all').addEventListener('click', () => {
-    try { download(rangeRows(state.reviews, {start: 0, end: 499}), '000_499.jsonl'); message('已发起全部标注备份下载。'); }
     catch (error) { message(error.message, true); }
   });
   $('#import').addEventListener('change', importFile);
@@ -219,6 +216,20 @@ async function start() {
     }
   });
   refresh();
+  const connectUploads = async () => {
+    try {
+      uploader = await createUploader({manifest, getState: () => state, onStatus: ({text, error, url}) => {
+        $('#upload-state').textContent = text;
+        $('#upload-state').classList.toggle('error', error);
+        $('#upload-link').hidden = !url;
+        if (url) $('#upload-link').href = url;
+      }});
+    } catch {
+      $('#upload-state').textContent = '上传服务连接中断，30 秒后重试；本地保存和 JSONL 导出仍可用。';
+      setTimeout(connectUploads, 30000);
+    }
+  };
+  connectUploads();
 }
 start().catch(error => {
   message(error.message, true);

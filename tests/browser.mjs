@@ -7,8 +7,20 @@ const page = await browser.newPage({viewport: {width: 1440, height: 1000}, accep
 const errors = [];
 page.on('pageerror', e => errors.push(e.message));
 try {
+  const uploads = [];
+  await page.route('**/upload-config.json', route => route.fulfill({json: {endpoint: 'https://uploads.example.test', round_id: 'round-20260930T231132-d69c0f'}}));
+  await page.route('https://uploads.example.test/**', route => {
+    const headers = {'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'Content-Type, X-Upload-Key'};
+    if (route.request().method() === 'OPTIONS') return route.fulfill({status: 204, headers});
+    const body = route.request().postDataJSON();
+    uploads.push(body);
+    return route.fulfill({headers, json: {state: 'uploaded', count: body.records.length, digest: 'test', url: 'https://github.com/jcheniu/cartoon-review/tree/main/result/round_1'}});
+  });
   await page.goto(url);
   await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('/ 500'));
+  assert.deepEqual(await page.locator('.images .card-title strong').allTextContents(), ['候选 A', '候选 B', '输入原图']);
+  assert.equal(await page.locator('#split, #notes, #export-all').count(), 0);
+  await page.waitForFunction(() => document.querySelector('#upload-state').textContent.includes('自动上传已连接'));
   const manifest = await page.evaluate(async () => (await fetch('./data/manifest.json')).json());
   const group = Array.from({length: 20}, (_, i) => i * 25).find(start => manifest.items.slice(start, start + 25).every(item => item.candidates));
   assert.notEqual(group, undefined, 'Browser export test requires one complete group of real candidates');
@@ -31,6 +43,10 @@ try {
   const first = JSON.parse(partialText);
   assert.equal(first.accepted, 'neither');
   assert.deepEqual(first.rejection_reasons, ['color', 'pose']);
+  await page.waitForFunction(() => document.querySelector('#upload-state').textContent.startsWith('已上传'));
+  assert.ok(uploads.length > 0);
+  assert.equal(uploads[0].records[0].accepted, 'neither');
+  assert.equal('notes' in uploads[0].records[0], false);
   await page.reload();
   await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('1 / 500'));
   let completed;
@@ -84,5 +100,5 @@ try {
   await page.getByRole('link', {name: '操作说明 ↗'}).click();
   assert.match(await page.locator('h1').textContent(), /标注操作说明/);
   assert.deepEqual(errors, []);
-  console.log('Browser passed: subpath assets, real images, rejection, save/reload, 25-row automatic export, edits, import validation, pending candidates and mobile layout.');
+  console.log('Browser passed: A/B/source order, removed controls, automatic GitHub upload, subpath assets, real images, rejection, save/reload, 25-row automatic export, edits, import validation, pending candidates and mobile layout.');
 } finally { await browser.close(); }

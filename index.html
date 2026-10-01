@@ -13,10 +13,10 @@
   <div class="header-links"><a href="./guide.html">操作说明 ↗</a><a href="https://github.com/jcheniu/cartoon-review" target="_blank" rel="noopener noreferrer">公开仓库 ↗</a></div>
 </header>
 <main>
-  <p class="storage-note">标注仅保存在当前浏览器，不会上传到服务器。每完成 25 张自动下载 JSONL；请保留下载文件，换设备时可导入恢复。</p>
+  <p class="storage-note">保存后自动上传到公开 GitHub result/round_1，同时保留浏览器副本。每组 25 张标完仍自动下载 JSONL。</p>
   <section class="toolbar">
     <label>类别<select id="category"><option value="">全部输入</option><option value="animal">动物照片</option><option value="anime">动漫脸</option></select></label>
-    <label>用途<select id="split"><option value="">全部划分</option><option value="train">训练集</option><option value="validation">验证集</option><option value="test">最终测试集</option></select></label>
+
     <label>标注状态<select id="filter"><option value="pending">待标注</option><option value="all">全部</option><option value="reviewed">已标注</option></select></label>
     <div class="count"><strong id="progress">正在读取数据…</strong><span id="dataset"></span></div>
   </section>
@@ -30,9 +30,9 @@
     <div><button id="prev" class="quiet">← 上一张</button><button id="next" class="quiet">下一张 →</button></div>
   </section>
   <section class="images">
-    <article><div class="card-title"><strong>输入原图</strong><span id="dimensions"></span></div><div class="image-box"><img id="source" alt="输入原图"><span class="placeholder">暂无图像</span></div></article>
     <article id="card-a"><div class="card-title"><strong>候选 A</strong><span id="strength-a"></span></div><div class="image-box"><img id="a" alt="候选 A"><span class="placeholder">此图候选待生成</span></div></article>
     <article id="card-b"><div class="card-title"><strong>候选 B</strong><span id="strength-b"></span></div><div class="image-box"><img id="b" alt="候选 B"><span class="placeholder">此图候选待生成</span></div></article>
+    <article><div class="card-title"><strong>输入原图</strong><span id="dimensions"></span></div><div class="image-box"><img id="source" alt="输入原图"><span class="placeholder">暂无图像</span></div></article>
   </section>
   <section class="review">
     <div class="review-main">
@@ -46,12 +46,11 @@
       <label>目标图描述（英语；请修正颜色、物种或发色等错误）<textarea id="caption" rows="3" maxlength="2000"></textarea></label>
     </div>
     <div class="review-side">
-      <label>备注<textarea id="notes" rows="3" maxlength="2000" placeholder="例如：颜色错误、姿态改变、眼睛变形"></textarea></label>
       <button id="save" class="primary" disabled>保存并下一张 <kbd>Enter</kbd></button>
       <span id="save-state">选择合格候选后保存</span>
+      <div id="upload-state" role="status" aria-live="polite">正在连接自动上传…</div><a id="upload-link" hidden target="_blank" rel="noopener noreferrer">查看刚上传的 GitHub 文件 ↗</a>
       <span class="export-hint">本组 25 张标完自动导出，如 000_024.jsonl。浏览器若拦截下载，请点下方按钮。</span>
       <button id="export-now">导出本组 JSONL</button>
-      <button id="export-all">备份全部已标注 JSONL</button>
       <label class="import-label">导入 JSONL 恢复标注<input id="import" type="file" accept=".jsonl,application/jsonl,application/x-ndjson"></label>
       <span class="export-hint">导入会覆盖文件内同一图片的本地标注；其他图片不变。</span>
     </div>

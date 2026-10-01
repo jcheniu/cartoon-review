@@ -1,19 +1,16 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>操作说明 · 卡通图像标注</title><link rel="stylesheet" href="./assets/style.css"></head>
 <body><header><div><span class="eyebrow">CARTOON REVIEW / GUIDE</span><h1>标注操作说明</h1><p>选卡通风格，同时保持原图主体不失真。</p></div><a href="./index.html">返回标注 →</a></header>
-<main class="guide">
-<ol>
-<li><strong>选择一组。</strong>输入 0-24、25-49 或 450-474 等连续 25 张范围，点“应用”。</li>
-<li><strong>对照原图。</strong>卡通结果应有清晰轮廓与简洁色块，同时保留五官、姿态和主要颜色。</li>
+<main class="guide"><ol>
+<li><strong>选择一组。</strong>输入 0-24 或 450-474 等连续 25 张范围，点“应用”。</li>
+<li><strong>按顺序比较。</strong>从左到右是候选 A、候选 B、输入原图。检查轮廓、五官、姿态和主要颜色。</li>
 <li><strong>选择合格情况。</strong>仅 A、仅 B、都合格或都不合格；都合格时选偏好，都不合格时勾选“颜色”和／或“姿态”。</li>
-<li><strong>保存。</strong>修正英语描述，按“保存并下一张”。输入框外可用 1–4 选择、Enter 保存。</li>
-<li><strong>保留导出文件。</strong>本组 25 张全部标完自动下载，例如 000_024.jsonl；下载被拦截时点击“导出本组 JSONL”。也可提前手动导出已保存的部分。</li>
-<li><strong>修改与交付。</strong>切换到“已标注”或“全部”修改，重新导出后将 JSONL 交给数据负责人。</li>
+<li><strong>保存并上传。</strong>修正英语描述，点“保存并下一张”。页面自动上传到 GitHub，成功后显示“已上传”及文件链接。</li>
+<li><strong>保留导出文件。</strong>本组标完自动下载 000_024.jsonl 等文件，也可提前手动导出。连接失败时浏览器保留标注并自动重试。</li>
+<li><strong>修改或恢复。</strong>切换“已标注”修改，保存后会自动上传新版本；换设备可以逐组导入 JSONL。</li>
 </ol>
-<h2>标注存在哪里？</h2><p>保存在当前浏览器，不会上传服务器，也不会自动同步给其他人。清理浏览器、结束无痕模式或换设备可能导致丢失，请及时下载备份。</p>
-<h2>如何换设备？</h2><p>点击“备份全部已标注 JSONL”，在另一设备打开相同网页后导入文件。导入会覆盖文件内同编号的标注。不要同时在多个标签页编辑。</p>
-<h2>为什么部分图片没有候选？</h2><p>这是生成任务的发布快照。候选待生成时不能标注；维护者更新候选后，刷新页面即可读取。更新同一轮候选会保留已有标注。</p>
-<h2>如何分配任务？</h2><p>用链接附带范围，例如 <a href="./?range=450-474">450–474 组</a>。每位操作者独立保存和导出，由负责人收回并处理重复或分歧。</p>
-<h2>许可与数据</h2><p>250 张真实猫狗照片 + 250 张合成动漫脸。来源与许可保留在每张图下方及数据清单中。后续训练只能使用训练集中人工通过的目标。</p>
-<p><a href="https://github.com/jcheniu/cartoon-review/blob/main/README.md">完整 README ↗</a> · <a href="./index.html">开始标注 →</a></p>
+<h2>结果存在哪里？</h2><p>公开保存到 GitHub 的 result/round_1 下，每个浏览器有独立的会话文件夹。同一组使用 xxx_xxx.jsonl 命名；页面显示“已上传”表示已提交到 GitHub。浏览器也保留副本。</p>
+<h2>上传还未成功怎么办？</h2><p>保持页面打开，网络恢复后会自动重试。也可先导出本组 JSONL。清理浏览器前请确认上传完成或保留下载文件。</p>
+<h2>多人如何分配？</h2><p>发送带范围的链接，例如 <a href="./?range=450-474">450–474 组</a>。不同会话不会覆盖彼此的结果；同一图的不同意见由负责人合并。</p>
+<p><a href="https://github.com/jcheniu/cartoon-review/tree/main/result/round_1">查看 GitHub 结果 ↗</a> · <a href="./index.html">开始标注 →</a></p>
 </main></body></html>

@@ -2,7 +2,7 @@
 
 UTF-8; one JSON object per line, with a trailing newline. Rows are sorted by image_number.
 The group filename uses three-digit inclusive bounds, e.g. 000_024.jsonl or 450_474.jsonl.
-Manual exports can contain fewer than 25 rows. The full-browser backup is 000_499.jsonl.
+Manual exports can contain fewer than 25 rows. Automatic GitHub uploads use result/round_1/<upload-session>/<start>_<end>.jsonl on main.
 
 | Field | Meaning |
 | --- | --- |
@@ -17,7 +17,7 @@ Manual exports can contain fewer than 25 rows. The full-browser backup is 000_49
 | accepted | a, b, both, neither |
 | preferred | a, b, tie, neither; must agree with accepted |
 | rejection_reasons | color and/or pose when accepted=neither; otherwise empty |
-| caption / notes | Operator-edited target description and remarks |
+| caption | Operator-edited target description |
 | review_version / reviewed_at | Per-browser revision counter and ISO timestamp |
 | source_sha256 / source | Exact input identity, public relative path and license |
 | candidate_hashes | SHA-256 of the reviewed A and B PNG files |
@@ -33,3 +33,5 @@ need a deliberate conversion before import.
 Review versions are not globally ordered between annotators. Resolve competing annotations explicitly.
 Hash metadata allows the data owner to link public judgments to private masters; it is not a digital signature
 and does not authenticate a reviewer. Nothing in this repository runs training automatically.
+
+The removed notes field is not included in new exports or server uploads. Fixed split metadata is retained even though the UI no longer filters by split. The upload-session directory isolates browser owners; imported records may retain their original annotation_session_id.\n

@@ -33,7 +33,6 @@ export function makeReview(manifest, item, form, previous, session) {
     reviewed_at: new Date().toISOString(),
     accepted, preferred, rejection_reasons: reasons,
     caption: String(form.caption || '').trim().slice(0, 2000),
-    notes: String(form.notes || '').trim().slice(0, 2000),
     source_sha256: item.sha256,
     source: {path: item.path, sha256: item.sha256, license: item.license, source_url: item.source_url},
     candidate_hashes: {a: item.candidates.a.sha256, b: item.candidates.b.sha256},
@@ -59,7 +58,7 @@ export function validateImported(manifest, row) {
   }
   const clean = makeReview(manifest, item, {
     choice: choiceOf(row), preferred: row.preferred, reasons: row.rejection_reasons,
-    caption: row.caption, notes: row.notes,
+    caption: row.caption,
   }, null, row.annotation_session_id);
   clean.review_version = row.review_version;
   clean.reviewed_at = row.reviewed_at;

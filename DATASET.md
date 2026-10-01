@@ -44,5 +44,5 @@ Incomplete pairs are represented by a null candidates field; no placeholder is c
 ## Public snapshot boundaries
 
 The package includes 500 selected original inputs, available 256px A/B pairs and public provenance.
-It excludes private human labels, review history, training masters, adapters, model caches and connection metadata.
-Do not commit operator JSONL files without their explicit authorization.
+Private historical teacher labels, training masters, adapters, model caches and connection metadata are excluded.
+Public-web annotations are uploaded under result/round_1 with the operator-facing upload notice.\nSession identifiers are random browser identifiers, not verified personal identities.
