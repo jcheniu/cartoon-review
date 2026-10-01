@@ -5,7 +5,7 @@
   "description": "Public cartoon candidate annotation UI with 500 attributed inputs",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/review.test.mjs",
+    "test": "node --test tests/review.test.mjs tests/edge.test.mjs",
     "test:browser": "node tests/browser.mjs",
     "verify:data": "python3 scripts/verify_snapshot.py"
   },
