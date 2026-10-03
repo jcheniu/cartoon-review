@@ -2,7 +2,7 @@ import {rangeRows, rangeName} from './review.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function signature(rows) {
-  const bytes = new TextEncoder().encode(JSON.stringify(rows));
+  const bytes = new TextEncoder().encode(JSON.stringify(rows.map(({review_version, reviewed_at, ...annotation}) => annotation)));
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 export async function createUploader({manifest, getState, onStatus}) {
@@ -32,6 +32,8 @@ export async function createUploader({manifest, getState, onStatus}) {
   }
   const metaKey = 'cartoon-review-upload-state:' + manifest.round.id + ':' + session;
   let meta = JSON.parse(localStorage.getItem(metaKey) || '{"ranges":{},"uploaded":{}}');
+  meta.saved ||= {};
+  meta.pending ||= {};
   let running = false, retry = null;
   const persist = () => localStorage.setItem(metaKey, JSON.stringify(meta));
   const notify = (text, error = false, url = '') => onStatus({text, error, url});
@@ -61,22 +63,46 @@ export async function createUploader({manifest, getState, onStatus}) {
         const rows = rangeRows(getState().reviews, range);
         if (!rows.length) continue;
         const currentSignature = await signature(rows);
-        if (meta.uploaded[name] === currentSignature) continue;
-        notify('正在上传 ' + name + '（' + rows.length + '/25）…');
+        const complete = rows.length === 25;
+        if (!meta.pending[name] && meta.saved[name] === currentSignature &&
+            (!complete || meta.uploaded[name] === currentSignature)) continue;
+        meta.pending[name] = currentSignature;
+        persist(); // An interrupted POST may already have changed the receiver's queued snapshot.
+        notify('正在保存 ' + name + '（' + rows.length + '/25）…');
         let result = await request('/api/reviews', {session_id: session, range, records: rows});
+        if (!complete) {
+          delete meta.pending[name];
+          meta.saved[name] = currentSignature;
+          delete meta.uploaded[name];
+          persist();
+          notify('已保存 ' + name + '（' + rows.length + '/25）；满 25 张后自动提交');
+          continue;
+        }
+        let changed = false;
         for (let poll = 0; result.state !== 'uploaded'; poll++) {
-          notify('已接收 ' + name + '，正在写入 GitHub…');
+          notify('本组 JSONL 已保存，合并连续修改后自动提交 GitHub…');
           await sleep(Math.min(3000 + poll * 500, 10000));
+          if (await signature(rangeRows(getState().reviews, range)) !== currentSignature) {
+            changed = true;
+            break;
+          }
           result = await request('/api/status?session=' + session + '&start=' + range.start + '&end=' + range.end);
           if (poll >= 30) throw Error('GitHub 写入排队中，稍后自动重试');
         }
+        if (changed) continue;
+        if (result.count !== 25) throw Error('本组尚未满 25 张，不会创建提交');
+        delete meta.pending[name];
         meta.uploaded[name] = currentSignature;
+        meta.saved[name] = currentSignature;
         persist();
-        notify('已上传 ' + name + '（' + result.count + '/25）', false, result.url);
+        notify('已上传 ' + name + '（25/25）', false, result.url);
       }
       // Another save may have occurred while this request was in flight.
       for (const [name, range] of Object.entries(meta.ranges)) {
-        if (rangeRows(getState().reviews, range).length && meta.uploaded[name] !== await signature(rangeRows(getState().reviews, range))) {
+        const rows = rangeRows(getState().reviews, range);
+        const currentSignature = rows.length ? await signature(rows) : '';
+        if (rows.length && (meta.pending[name] || meta.saved[name] !== currentSignature ||
+            (rows.length === 25 && meta.uploaded[name] !== currentSignature))) {
           retry = setTimeout(pump, 300);
           break;
         }
@@ -89,7 +115,8 @@ export async function createUploader({manifest, getState, onStatus}) {
   function enqueue(range) {
     meta.ranges[rangeName(range)] = {...range};
     persist();
-    pump();
+    clearTimeout(retry);
+    retry = setTimeout(pump, 500);
   }
   for (const row of Object.values(getState().reviews)) {
     const start = Math.floor(row.image_number / 25) * 25;
@@ -98,7 +125,7 @@ export async function createUploader({manifest, getState, onStatus}) {
   }
   persist();
   window.addEventListener('online', pump);
-  notify('自动上传已连接：保存后写入 GitHub result/round_1');
+  notify('自动上传已连接：满 25 张、JSONL 保存后自动提交 GitHub');
   pump();
   return {enqueue};
 }

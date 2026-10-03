@@ -7,5 +7,6 @@
   "routes": [
     {"pattern": "api.asuperstrongfrog.com", "custom_domain": true}
   ],
+  "kv_namespaces": [{"binding": "ENDPOINTS", "id": "722c94d4c20d499b84709842305a9d86"}],
   "observability": {"enabled": false}
 }

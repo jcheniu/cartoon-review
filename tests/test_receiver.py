@@ -1,36 +1,160 @@
-import copy,json,pathlib,sys,tempfile,unittest,uuid
+import copy,json,pathlib,sqlite3,sys,tempfile,unittest,uuid
+from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'server'))
-from receiver import Receiver,ReviewError,validate_rows
+from receiver import Receiver,ReviewError,canonical,sha,github_write
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 
 class ReceiverTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
-        self.writes=[]
-        self.service=Receiver(self.temp.name,writer=lambda path,content:self.writes.append((path,content)) or 'https://github.com/jcheniu/cartoon-review/blob/main/'+path)
+        self.writes=[];self.now=1000
+        self.service=Receiver(self.temp.name,writer=self.write,clock=lambda:self.now)
         self.manifest=json.loads((ROOT/'data/manifest.json').read_text())
-        self.item=next(i for i in self.manifest['items'] if i['candidates'])
+        self.items=[i for i in self.manifest['items'] if 0<=i['image_number']<=24]
+        self.item=self.items[0]
         self.session=str(uuid.uuid4());self.key='a'*64
-        start=(self.item['image_number']//25)*25
-        self.row=dict(photo_id=self.item['id'],round_id=self.manifest['round']['id'],
-            dataset_sha256=self.manifest['dataset_sha256'],source_sha256=self.item['sha256'],
-            candidate_hashes={v:self.item['candidates'][v]['sha256'] for v in ('a','b')},
-            accepted='a',preferred='a',rejection_reasons=[],caption='a cartoon cat',
-            annotation_session_id=self.session,review_version=1,reviewed_at='2026-10-01T00:00:00Z',
-            notes='DO NOT PUBLISH THIS REMOVED FIELD',path='../escape',github_token='NEVER COPY')
-        self.body=dict(session_id=self.session,range=dict(start=start,end=start+24),records=[self.row])
+        self.body=self.body_for(25)
     def tearDown(self):self.temp.cleanup()
-    def test_upload_only_safe_fields_and_fixed_path(self):
-        r=self.service.submit(self.body,self.key)
-        self.assertEqual(r['state'],'pending')
+    def write(self,path,content):
+        snapshot=self.service.snapshot_path(self.session,0,24)
+        self.assertEqual(snapshot.read_text(),content,'Commit requires the durable JSONL snapshot')
+        self.writes.append((path,content))
+        return 'https://github.com/jcheniu/cartoon-review/blob/main/'+path
+    def row_for(self,item):
+        return dict(photo_id=item['id'],round_id=self.manifest['round']['id'],
+            dataset_sha256=self.manifest['dataset_sha256'],source_sha256=item['sha256'],
+            candidate_hashes={v:item['candidates'][v]['sha256'] for v in ('a','b')},
+            accepted='a',preferred='a',rejection_reasons=[],caption='a cartoon subject',
+            annotation_session_id=self.session,review_version=1,reviewed_at='2026-10-01T00:00:00Z',
+            notes='REMOVED FIELD',path='../escape',github_token='NEVER COPY')
+    def body_for(self,count):
+        return dict(session_id=self.session,range=dict(start=0,end=24),records=[self.row_for(i) for i in self.items[:count]])
+    def publish(self):
+        self.now+=30
         self.assertTrue(self.service.process_one())
+    def test_partial_is_durable_but_never_committed(self):
+        r=self.service.submit(self.body_for(24),self.key)
+        self.assertEqual((r['state'],r['count']),('draft',24))
+        self.now+=100
+        self.assertFalse(self.service.process_one())
+        self.assertEqual(self.writes,[])
+        self.assertEqual(len(self.service.snapshot_path(self.session,0,24).read_text().splitlines()),24)
+    def test_25_incremental_saves_make_one_commit_after_quiet_period(self):
+        for item in self.items:
+            body=self.body_for(1);body['records']=[self.row_for(item)]
+            self.service.submit(body,self.key)
+            self.assertFalse(self.service.process_one())
+            self.now+=1
+        self.now+=28
+        self.assertFalse(self.service.process_one())
+        self.now+=1
+        self.assertTrue(self.service.process_one())
+        self.assertEqual(len(self.writes),1)
         path,content=self.writes[0]
         self.assertEqual(path,f'result/round_1/{self.session}/000_024.jsonl')
-        row=json.loads(content)
-        self.assertNotIn('notes',row);self.assertNotIn('github_token',row);self.assertNotIn('path',row)
+        self.assertEqual(len(content.splitlines()),25)
+        row=json.loads(content.splitlines()[0])
+        for name in ['notes','github_token','path']:self.assertNotIn(name,row)
         self.assertEqual(row['split'],self.item['split'])
-        self.assertEqual(self.service.submit(self.body,self.key)['state'],'uploaded')
+    def test_repeated_requests_and_metadata_only_changes_do_not_commit(self):
+        self.service.submit(self.body,self.key);self.publish()
+        for _ in range(4):
+            self.assertEqual(self.service.submit(self.body,self.key)['state'],'uploaded')
+            self.assertFalse(self.service.process_one())
+        newer=copy.deepcopy(self.body)
+        for row in newer['records']:
+            row['review_version']=2;row['reviewed_at']='2026-10-02T00:00:00Z'
+        self.assertEqual(self.service.submit(newer,self.key)['state'],'uploaded')
+        self.now+=100
         self.assertFalse(self.service.process_one())
+        self.assertEqual(len(self.writes),1)
+    def test_continuous_edits_are_coalesced(self):
+        self.service.submit(self.body,self.key);self.publish()
+        amended=copy.deepcopy(self.body)
+        for version in range(2,5):
+            self.now+=10
+            amended['records'][0]['review_version']=version
+            amended['records'][0]['caption']='a revised cartoon '+str(version)
+            self.service.submit(amended,self.key)
+            self.assertFalse(self.service.process_one())
+        self.now+=29
+        self.assertFalse(self.service.process_one())
+        self.now+=1
+        self.assertTrue(self.service.process_one())
+        self.assertEqual(len(self.writes),2)
+        self.assertEqual(json.loads(self.writes[-1][1].splitlines()[0])['review_version'],4)
+    def test_save_during_commit_preserves_new_pending_snapshot(self):
+        self.service.submit(self.body,self.key)
+        def write(path,content):
+            amended=copy.deepcopy(self.body)
+            amended['records'][0].update(review_version=2,accepted='b',preferred='b')
+            self.service.submit(amended,self.key)
+            return 'https://github.com/example'
+        self.service.writer=write;self.publish()
+        self.assertEqual(self.service.status(self.session,0,24,self.key)['state'],'pending')
+        self.service.writer=self.write
+        self.assertFalse(self.service.process_one())
+        self.publish()
+        self.assertEqual(self.service.status(self.session,0,24,self.key)['state'],'uploaded')
+        with self.assertRaises(ReviewError):self.service.submit(self.body,self.key)
+    def test_failure_backoff_survives_restart(self):
+        self.service.submit(self.body,self.key)
+        def fail(*args):raise RuntimeError('upstream')
+        self.service.writer=fail;self.publish()
+        restored=Receiver(self.temp.name,writer=self.write,clock=lambda:self.now)
+        self.assertEqual(restored.status(self.session,0,24,self.key)['state'],'pending')
+        self.assertFalse(restored.process_one())
+        self.now+=60
+        self.assertTrue(restored.process_one())
+        self.assertEqual(len(self.writes),1)
+    def test_snapshot_failure_prevents_publication(self):
+        with patch.object(self.service,'save_snapshot',side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):self.service.submit(self.body,self.key)
+        self.now+=100
+        self.assertFalse(self.service.process_one())
+        self.assertEqual(self.writes,[])
+    def test_existing_uploaded_full_groups_do_not_recommit_after_restart(self):
+        self.service.submit(self.body,self.key);self.publish()
+        restored=Receiver(self.temp.name,writer=self.write,clock=lambda:self.now)
+        self.assertFalse(restored.process_one())
+        self.assertEqual(restored.submit(self.body,self.key)['state'],'uploaded')
+        self.assertEqual(len(self.writes),1)
+    def test_legacy_partial_upload_migrates_to_draft(self):
+        with tempfile.TemporaryDirectory() as directory:
+            row=self.row_for(self.item);row['image_number']=self.item['image_number']
+            content=canonical(row)+'\n'
+            with sqlite3.connect(pathlib.Path(directory)/'uploads.sqlite3') as db:
+                db.executescript('CREATE TABLE sessions(id TEXT PRIMARY KEY,key_hash TEXT);CREATE TABLE uploads(session TEXT,start INTEGER,end INTEGER,content TEXT,digest TEXT,state TEXT,url TEXT,error TEXT,updated REAL,PRIMARY KEY(session,start,end));')
+                db.execute('INSERT INTO sessions VALUES(?,?)',(self.session,sha(self.key)))
+                db.execute('INSERT INTO uploads VALUES(?,?,?,?,?,?,?,?,?)',(self.session,0,24,content,sha(content),'uploaded','https://github.com/old','',1))
+            restored=Receiver(directory,writer=lambda *_:self.fail('Legacy partial must not commit'),clock=lambda:self.now)
+            self.assertEqual(restored.status(self.session,0,24,self.key)['state'],'draft')
+            self.assertFalse(restored.process_one())
+            self.assertEqual(restored.snapshot_path(self.session,0,24).read_text(),content)
+    def test_reverting_queued_edit_to_published_content_cancels_commit(self):
+        self.service.submit(self.body,self.key);self.publish()
+        amended=copy.deepcopy(self.body)
+        amended['records'][0].update(review_version=2,accepted='b',preferred='b')
+        self.service.submit(amended,self.key)
+        reverted=copy.deepcopy(self.body)
+        reverted['records'][0]['review_version']=3
+        self.assertEqual(self.service.submit(reverted,self.key)['state'],'uploaded')
+        self.now+=60
+        self.assertFalse(self.service.process_one())
+        self.assertEqual(len(self.writes),1)
+    def test_github_writer_deduplicates_timestamp_only_changes(self):
+        import base64
+        rows=self.body['records']
+        for row,item in zip(rows,self.items):row['image_number']=item['image_number']
+        previous=''.join(canonical(r)+'\n' for r in rows)
+        newer=copy.deepcopy(rows)
+        for row in newer:row['review_version']=2;row['reviewed_at']='2026-10-02T00:00:00Z'
+        content=''.join(canonical(r)+'\n' for r in newer)
+        old=dict(content=base64.b64encode(previous.encode()).decode(),html_url='https://github.com/existing',sha='old')
+        with patch('receiver.github_json',return_value=old) as api:
+            self.assertEqual(github_write(f'result/round_1/{self.session}/000_024.jsonl',content),old['html_url'])
+            self.assertEqual(api.call_count,1)
+            self.assertEqual(api.call_args.args[0],'GET')
     def test_session_key_prevents_overwriting_another_browser(self):
         self.service.submit(self.body,self.key)
         with self.assertRaises(ReviewError):self.service.submit(self.body,'b'*64)
@@ -41,26 +165,10 @@ class ReceiverTests(unittest.TestCase):
             with self.assertRaises(ReviewError):self.service.submit(body,self.key)
         body=copy.deepcopy(self.body);body['range']['end']=500
         with self.assertRaises(ReviewError):self.service.submit(body,self.key)
-    def test_new_save_during_upload_remains_pending(self):
-        self.service.submit(self.body,self.key)
-        def write(path,content):
-            body=copy.deepcopy(self.body);body['records'][0]['review_version']=2
-            body['records'][0]['preferred']=body['records'][0]['accepted']='b'
-            self.service.submit(body,self.key)
-            return 'https://github.com/example'
-        self.service.writer=write;self.service.process_one()
-        self.assertEqual(self.service.status(self.session,0,24,self.key)['state'],'pending')
-        self.service.writer=lambda *args:'https://github.com/example'
-        self.service.process_one()
-        self.assertEqual(self.service.status(self.session,0,24,self.key)['state'],'uploaded')
-        with self.assertRaises(ReviewError):self.service.submit(self.body,self.key)
-    def test_failure_is_durable_and_retried(self):
-        self.service.submit(self.body,self.key)
-        def fail(*args):raise RuntimeError('upstream')
-        self.service.writer=fail;self.service.process_one()
-        restored=Receiver(self.temp.name,writer=lambda *args:'https://github.com/example')
-        self.assertEqual(restored.status(self.session,0,24,self.key)['state'],'pending')
-        restored.process_one()
-        self.assertEqual(restored.status(self.session,0,24,self.key)['state'],'uploaded')
+    def test_github_writer_rejects_discovery_and_partial_files(self):
+        with self.assertRaises(ValueError):github_write('result/round_1/service.json','{}')
+        rows=self.body_for(24)['records']
+        for row,item in zip(rows,self.items):row['image_number']=item['image_number']
+        with self.assertRaises(ValueError):github_write(f'result/round_1/{self.session}/000_024.jsonl',''.join(canonical(r)+'\n' for r in rows))
 
 if __name__=='__main__':unittest.main()

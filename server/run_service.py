@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the receiver and temporary SSH tunnel alive; publish endpoint discovery to GitHub."""
+"""Keep the receiver and temporary SSH tunnel alive; publish signed endpoint discovery to Cloudflare KV."""
 import argparse
 import fcntl
 import json
@@ -11,7 +11,8 @@ import signal
 import subprocess
 import sys
 import time
-from receiver import ROOT, ROUND, github_write
+from receiver import ROOT, ROUND
+from endpoint import publish
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -25,6 +26,9 @@ def main():
     os.chmod(directory, 0o700)
     supervisor_lock = (directory / "supervisor.lock").open("a")
     fcntl.flock(supervisor_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    key_path = directory / "endpoint-signing.pem"
+    if not key_path.is_file():
+        raise SystemExit("Create the private endpoint signing key before starting the supervisor")
     receiver, tunnel = None, None
     receiver_log = (directory / "receiver.log").open("ab")
     tunnel_log = (directory / "tunnel.log").open("a")
@@ -54,6 +58,7 @@ def main():
                     "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "-o", "ExitOnForwardFailure=yes",
                     "-R", f"80:127.0.0.1:{args.port}", "nokey@localhost.run", "--", "--output", "json",
                 ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+                tail = ""
                 os.set_blocking(tunnel.stdout.fileno(), False)
                 selector.register(tunnel.stdout, selectors.EVENT_READ)
                 print("Temporary HTTPS tunnel connecting", flush=True)
@@ -73,14 +78,11 @@ def main():
                         (directory / "endpoint.json").write_text(json.dumps({"endpoint": endpoint, "round_id": ROUND}))
             if endpoint and endpoint != published and time.time() >= retry_at:
                 try:
-                    config = json.dumps({"endpoint": endpoint, "round_id": ROUND}, indent=2) + "\n"
-                    with (directory / "github-write.lock").open("a") as lock:
-                        fcntl.flock(lock, fcntl.LOCK_EX)
-                        github_write("result/round_1/service.json", config)
+                    publish(endpoint, key_path)
                     published = endpoint
                     print("Published endpoint discovery", flush=True)
                 except Exception:
-                    retry_at = time.time() + 30
+                    retry_at = time.time() + 60
                     print("Endpoint publication will retry", flush=True)
     finally:
         for process in (receiver, tunnel):

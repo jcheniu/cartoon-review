@@ -17,6 +17,10 @@ export function makeReview(manifest, item, form, previous, session) {
   const preferred = form.choice === 'both' ? form.preferred : accepted;
   if (accepted === 'both' && !['a', 'b', 'tie'].includes(preferred)) throw Error('请选择更偏好的候选。');
   if (accepted !== 'neither' && String(form.caption || '').trim().length < 5) throw Error('请用英语描述合格的目标图，至少 5 个字符。');
+  const caption = String(form.caption || '').trim().slice(0, 2000);
+  if (previous && previous.accepted === accepted && previous.preferred === preferred &&
+      previous.caption === caption &&
+      JSON.stringify([...previous.rejection_reasons].sort()) === JSON.stringify([...reasons].sort())) return previous;
   return {
     schema_version: 1,
     dataset_sha256: manifest.dataset_sha256,
@@ -32,7 +36,7 @@ export function makeReview(manifest, item, form, previous, session) {
     review_version: (previous?.review_version || 0) + 1,
     reviewed_at: new Date().toISOString(),
     accepted, preferred, rejection_reasons: reasons,
-    caption: String(form.caption || '').trim().slice(0, 2000),
+    caption,
     source_sha256: item.sha256,
     source: {path: item.path, sha256: item.sha256, license: item.license, source_url: item.source_url},
     candidate_hashes: {a: item.candidates.a.sha256, b: item.candidates.b.sha256},

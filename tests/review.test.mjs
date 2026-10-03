@@ -53,3 +53,12 @@ test('range export includes only saved rows in numeric order', () => {
   const c = {...make({}), image_number: 25};
   assert.deepEqual(rangeRows({a, b, c}, {start: 0, end: 24}).map(r => r.image_number), [0, 24]);
 });
+
+test('unchanged user choices preserve the original revision and timestamp', () => {
+  const item = manifest.items[0];
+  const form = {choice: 'a', preferred: 'a', reasons: [], caption: 'a cartoon subject'};
+  const previous = makeReview(manifest, item, form, null, 'session');
+  assert.equal(makeReview(manifest, item, {...form, caption: '  a cartoon subject  '}, previous, 'session'), previous);
+  const edited = makeReview(manifest, item, {...form, caption: 'a different cartoon subject'}, previous, 'session');
+  assert.equal(edited.review_version, previous.review_version + 1);
+});

@@ -37,6 +37,16 @@ def canonical(value):
 def sha(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
+def annotation_digest(content):
+    # Revision/timestamp changes alone are not a new human annotation.
+    rows = [json.loads(line) for line in content.splitlines() if line.strip()]
+    return sha(canonical([{k: v for k, v in row.items()
+                           if k not in ("review_version", "reviewed_at")} for row in rows]))
+
+def complete(content, start, end):
+    rows = [json.loads(line) for line in content.splitlines() if line.strip()]
+    return [row.get("image_number") for row in rows] == list(range(start, end + 1))
+
 def bounds(value):
     if not isinstance(value, dict):
         raise ReviewError("Invalid group")
@@ -116,14 +126,21 @@ def github_json(method, endpoint, body=None):
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 def github_write(path, content):
-    if not path.startswith(DESTINATION + "/") or ".." in path:
-        raise ValueError("Write outside the fixed result directory")
+    match = re.fullmatch(re.escape(DESTINATION) + r"/(" + UUID.pattern[1:-1] + r")/(\d{3})_(\d{3})\.jsonl", path)
+    if not match:
+        raise ValueError("Only review JSONL files may be committed")
+    start, end = map(int, match.groups()[1:])
+    bounds(dict(start=start, end=end))
+    if not complete(content, start, end):
+        raise ValueError("Only complete 25-row groups may be committed")
     for attempt in range(3):
         old = github_json("GET", f"repos/{REPO}/contents/{path}?ref={BRANCH}")
         encoded = base64.b64encode(content.encode()).decode()
-        if old and base64.b64decode(old.get("content", "")).decode() == content:
-            return old["html_url"]
-        body = dict(message="Save round 1 review results", content=encoded, branch=BRANCH,
+        if old:
+            previous = base64.b64decode(old.get("content", "")).decode()
+            if previous == content or annotation_digest(previous) == annotation_digest(content):
+                return old["html_url"]
+        body = dict(message="Save completed round 1 review group " + path.rsplit("/", 1)[-1], content=encoded, branch=BRANCH,
                     author=dict(name="Jing", email="jcheniu@connect.ust.hk"))
         if old:
             body["sha"] = old["sha"]
@@ -138,12 +155,14 @@ def github_write(path, content):
             time.sleep(2 * (attempt + 1))
 
 class Receiver:
-    def __init__(self, data_dir, manifest_path=ROOT / "data/manifest.json", writer=github_write):
+    def __init__(self, data_dir, manifest_path=ROOT / "data/manifest.json", writer=github_write,
+                 clock=time.time, quiet_seconds=30, retry_seconds=60):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.data_dir, 0o700)
         self.db_path = self.data_dir / "uploads.sqlite3"
         self.manifest_path, self.writer = Path(manifest_path), writer
+        self.clock, self.quiet_seconds, self.retry_seconds = clock, quiet_seconds, retry_seconds
         self.wake = threading.Event()
         self.lock = threading.RLock()
         self.rate = {}
@@ -153,8 +172,22 @@ class Receiver:
                 CREATE TABLE IF NOT EXISTS uploads(
                     session TEXT, start INTEGER, end INTEGER, content TEXT, digest TEXT,
                     state TEXT, url TEXT, error TEXT, updated REAL,
+                    published_digest TEXT NOT NULL DEFAULT '', retry_at REAL NOT NULL DEFAULT 0,
                     PRIMARY KEY(session,start,end));
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(uploads)")}
+            migrate = "published_digest" not in columns
+            if migrate:
+                db.execute("ALTER TABLE uploads ADD COLUMN published_digest TEXT NOT NULL DEFAULT ''")
+            if "retry_at" not in columns:
+                db.execute("ALTER TABLE uploads ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
+            for row in db.execute("SELECT * FROM uploads").fetchall():
+                digest = annotation_digest(row["content"])
+                state = row["state"] if complete(row["content"], row["start"], row["end"]) else "draft"
+                published = digest if migrate and row["state"] == "uploaded" else row["published_digest"]
+                db.execute("UPDATE uploads SET digest=?,state=?,published_digest=? WHERE session=? AND start=? AND end=?",
+                           (digest, state, published, row["session"], row["start"], row["end"]))
+                self.save_snapshot(row["session"], row["start"], row["end"], row["content"])
         os.chmod(self.db_path, 0o600)
 
     @contextlib.contextmanager
@@ -162,11 +195,33 @@ class Receiver:
         db = sqlite3.connect(self.db_path, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=FULL")
         try:
             yield db
             db.commit()
         finally:
             db.close()
+
+    def snapshot_path(self, session, start, end):
+        return self.data_dir / "jsonl" / session / f"{start:03d}_{end:03d}.jsonl"
+
+    def save_snapshot(self, session, start, end, content):
+        path = self.snapshot_path(session, start, end)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.read_text() == content:
+            return
+        temporary = path.with_suffix(".jsonl.tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            os.chmod(temporary, 0o600)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def authenticate(self, db, session, key, create=False):
         if not isinstance(session, str) or not UUID.fullmatch(session) or not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
@@ -191,7 +246,7 @@ class Receiver:
         manifest = json.loads(self.manifest_path.read_text())
         records = validate_rows(manifest, body.get("records"), start, end)
         with self.lock, self.db() as db:
-            now = time.time()
+            now = self.clock()
             recent = [stamp for stamp in self.rate.get(ip, []) if now - stamp < 60]
             if len(recent) >= 120:
                 raise ReviewError("Please retry shortly", 429)
@@ -207,10 +262,24 @@ class Receiver:
                     raise ReviewError("A newer review is already uploaded; import the latest JSONL", 409)
                 merged[row["photo_id"]] = row
             content = "".join(canonical(row) + "\n" for row in sorted(merged.values(), key=lambda r: r["image_number"]))
-            digest = sha(content)
-            if not previous or previous["digest"] != digest:
-                db.execute("INSERT OR REPLACE INTO uploads VALUES(?,?,?,?,?,?,?,?,?)",
-                           (session, start, end, content, digest, "pending", "", "", now))
+            digest = annotation_digest(content)
+            changed = not previous or previous["digest"] != digest
+            # Durable JSONL must exist before the queue can make this snapshot publishable.
+            self.save_snapshot(session, start, end, content)
+            if changed:
+                published = previous["published_digest"] if previous else ""
+                state = ("uploaded" if digest == published else "pending") if complete(content, start, end) else "draft"
+                db.execute("""INSERT INTO uploads
+                    (session,start,end,content,digest,state,url,error,updated,published_digest,retry_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,0)
+                    ON CONFLICT(session,start,end) DO UPDATE SET
+                    content=excluded.content,digest=excluded.digest,state=excluded.state,
+                    error='',updated=excluded.updated,retry_at=0""",
+                    (session, start, end, content, digest, state, previous["url"] if previous else "", "", now, published))
+            elif previous["content"] != content:
+                # Record the newest revision locally without resetting the quiet period or committing metadata.
+                db.execute("UPDATE uploads SET content=? WHERE session=? AND start=? AND end=?",
+                           (content, session, start, end))
         self.wake.set()
         return self.status(session, start, end, key)
 
@@ -223,34 +292,54 @@ class Receiver:
             raise ReviewError("Group not found", 404)
         return dict(state=row["state"], digest=row["digest"], url=row["url"],
                     count=len(row["content"].splitlines()), error=row["error"],
+                    ready_at=max(row["updated"] + self.quiet_seconds, row["retry_at"]),
                     path=f"{DESTINATION}/{session}/{start:03d}_{end:03d}.jsonl")
 
     def process_one(self):
-        with self.db() as db:
-            row = db.execute("SELECT * FROM uploads WHERE state='pending' ORDER BY updated LIMIT 1").fetchone()
-        if not row:
-            return False
-        path = f"{DESTINATION}/{row['session']}/{row['start']:03d}_{row['end']:03d}.jsonl"
-        try:
-            # Publishers use this same lock when updating main, so annotations never race a code push.
-            with (self.data_dir / "github-write.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                url = self.writer(path, row["content"])
-            with self.db() as db:
-                db.execute("UPDATE uploads SET state='uploaded',url=?,error='' WHERE session=? AND start=? AND end=? AND digest=?",
-                           (url, row["session"], row["start"], row["end"], row["digest"]))
-        except Exception:
-            with self.db() as db:
-                db.execute("UPDATE uploads SET error='GitHub 暂时不可用，服务会自动重试',updated=? WHERE session=? AND start=? AND end=?",
-                           (time.time(), row["session"], row["start"], row["end"]))
+        # Re-read after obtaining the publisher lock so a queued old snapshot cannot bypass debounce.
+        with (self.data_dir / "github-write.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with self.lock, self.db() as db:
+                now = self.clock()
+                row = db.execute("""SELECT * FROM uploads WHERE state='pending' AND
+                    updated<=? AND retry_at<=? ORDER BY updated LIMIT 1""",
+                    (now - self.quiet_seconds, now)).fetchone()
+                if not row:
+                    return False
+                if not complete(row["content"], row["start"], row["end"]):
+                    db.execute("UPDATE uploads SET state='draft' WHERE session=? AND start=? AND end=?",
+                               (row["session"], row["start"], row["end"]))
+                    return False
+                if row["digest"] == row["published_digest"]:
+                    db.execute("UPDATE uploads SET state='uploaded' WHERE session=? AND start=? AND end=?",
+                               (row["session"], row["start"], row["end"]))
+                    return False
+                self.save_snapshot(row["session"], row["start"], row["end"], row["content"])
+                content = self.snapshot_path(row["session"], row["start"], row["end"]).read_text()
+                if content != row["content"]:
+                    raise RuntimeError("JSONL snapshot mismatch")
+            path = f"{DESTINATION}/{row['session']}/{row['start']:03d}_{row['end']:03d}.jsonl"
+            try:
+                url = self.writer(path, content)
+                with self.lock, self.db() as db:
+                    db.execute("""UPDATE uploads SET published_digest=?,url=?,
+                        state=CASE WHEN digest=? THEN 'uploaded' ELSE state END,
+                        error=CASE WHEN digest=? THEN '' ELSE error END
+                        WHERE session=? AND start=? AND end=?""",
+                        (row["digest"], url, row["digest"], row["digest"], row["session"], row["start"], row["end"]))
+            except Exception:
+                with self.lock, self.db() as db:
+                    db.execute("""UPDATE uploads SET error='GitHub 暂时不可用，服务会自动重试',retry_at=?
+                        WHERE session=? AND start=? AND end=? AND digest=?""",
+                        (self.clock() + self.retry_seconds, row["session"], row["start"], row["end"], row["digest"]))
         return True
 
     def worker(self):
         while True:
             if self.process_one():
-                time.sleep(15)  # Coalesce rapid saves and stay below GitHub write-rate limits.
+                time.sleep(15)
             else:
-                self.wake.wait(10)
+                self.wake.wait(5)
                 self.wake.clear()
 
 def handler(receiver, origins):

@@ -131,6 +131,11 @@ function save() {
       reasons: reasonInputs.filter(input => input.checked).map(input => input.value),
       caption: $('#caption').value,
     }, state.reviews[item.id], state.session);
+    if (review === state.reviews[item.id]) {
+      refresh(following);
+      message(pad(item.image_number) + ' 内容未变化，已保留原标注。');
+      return;
+    }
     persist({...state, reviews: {...state.reviews, [item.id]: review}});
     try { uploader?.enqueue(range); } catch { $('#upload-state').textContent = '本地保存成功；上传队列不可写，请导出本组 JSONL。'; }
     const rows = rangeRows(state.reviews, range);

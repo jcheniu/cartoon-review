@@ -12,9 +12,12 @@ try {
   await page.route('https://uploads.example.test/**', route => {
     const headers = {'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, POST, OPTIONS', 'access-control-allow-headers': 'Content-Type, X-Upload-Key'};
     if (route.request().method() === 'OPTIONS') return route.fulfill({status: 204, headers});
+    if (route.request().method() === 'GET') {
+      return route.fulfill({headers, json: {state: 'uploaded', count: 25, digest: 'test', url: 'https://github.com/jcheniu/cartoon-review/tree/main/result/round_1'}});
+    }
     const body = route.request().postDataJSON();
     uploads.push(body);
-    return route.fulfill({headers, json: {state: 'uploaded', count: body.records.length, digest: 'test', url: 'https://github.com/jcheniu/cartoon-review/tree/main/result/round_1'}});
+    return route.fulfill({headers, json: {state: body.records.length === 25 ? 'pending' : 'draft', count: body.records.length, digest: 'test', url: ''}});
   });
   await page.goto(url);
   await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('/ 500'));
@@ -43,8 +46,9 @@ try {
   const first = JSON.parse(partialText);
   assert.equal(first.accepted, 'neither');
   assert.deepEqual(first.rejection_reasons, ['color', 'pose']);
-  await page.waitForFunction(() => document.querySelector('#upload-state').textContent.startsWith('已上传'));
+  await page.waitForFunction(() => document.querySelector('#upload-state').textContent.includes('满 25 张后自动提交'));
   assert.ok(uploads.length > 0);
+  assert.equal(uploads[0].records.length, 1);
   assert.equal(uploads[0].records[0].accepted, 'neither');
   assert.equal('notes' in uploads[0].records[0], false);
   await page.reload();
@@ -61,6 +65,8 @@ try {
   assert.equal(lines.length, 25);
   assert.deepEqual(lines.map(line => JSON.parse(line).image_number), Array.from({length: 25}, (_, i) => group + i));
   assert.match(await page.locator('#message').textContent(), /25 张已完成/);
+  await page.waitForFunction(() => document.querySelector('#upload-state').textContent.startsWith('已上传'));
+  assert.equal(uploads.filter(body => body.records.length === 25).length, 1);
   await page.locator('#filter').selectOption('all');
   await page.locator('[data-choice="both"]').click();
   await page.locator('#preferred').selectOption('b');
@@ -70,10 +76,26 @@ try {
   const key = await page.evaluate(() => Object.keys(localStorage).find(k => k.startsWith('cartoon-review:')));
   const saved = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key);
   assert.equal(saved.reviews[String(group).padStart(3, '0')].review_version, 2);
+  await page.waitForFunction(() => document.querySelector('#upload-state').textContent.includes('合并连续修改'));
+  // Revert while the amended group is still pending: even the earlier published signature must be sent.
+  await page.locator('#apply-range').click();
+  await page.locator('[data-choice="neither"]').click();
+  await page.locator('[value="color"]').check();
+  await page.locator('[value="pose"]').check();
+  await page.locator('#caption').fill(first.caption);
+  await page.locator('#save').click();
+  await page.waitForFunction(() => document.querySelector('#upload-state').textContent.startsWith('已上传'));
+  const requestsBefore = uploads.length;
+  await page.locator('#apply-range').click();
+  await page.locator('#save').click();
+  assert.match(await page.locator('#message').textContent(), /内容未变化/);
+  assert.equal(uploads.length, requestsBefore);
+  assert.equal(await page.evaluate(({key,id}) => JSON.parse(localStorage.getItem(key)).reviews[id].review_version, {key,id:first.photo_id}),3);
+  assert.equal(uploads.filter(body=>body.records.length===25).at(-1).records[0].accepted,'neither');
   // Invalid import is atomic, and a valid file can restore the earlier single review.
   await page.locator('#import').setInputFiles({name: 'bad.jsonl', mimeType: 'application/x-ndjson', buffer: Buffer.from(JSON.stringify({...first, round_id: 'wrong'}))});
   await page.waitForFunction(() => document.querySelector('#message').textContent.includes('导入失败'));
-  assert.deepEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key), saved);
+  assert.equal(await page.evaluate(({key,id}) => JSON.parse(localStorage.getItem(key)).reviews[id].review_version, {key,id:first.photo_id}),3);
   await page.locator('#import').setInputFiles({name: filename, mimeType: 'application/x-ndjson', buffer: Buffer.from(partialText)});
   await page.waitForFunction(() => document.querySelector('#message').textContent.includes('已导入'));
   assert.equal(await page.evaluate(({key, id}) => JSON.parse(localStorage.getItem(key)).reviews[id].accepted, {key, id: first.photo_id}), 'neither');
@@ -100,5 +122,5 @@ try {
   await page.getByRole('link', {name: '操作说明 ↗'}).click();
   assert.match(await page.locator('h1').textContent(), /标注操作说明/);
   assert.deepEqual(errors, []);
-  console.log('Browser passed: A/B/source order, removed controls, automatic GitHub upload, subpath assets, real images, rejection, save/reload, 25-row automatic export, edits, import validation, pending candidates and mobile layout.');
+  console.log('Browser passed: A/B/source order, removed controls, draft saves without commits, one full-group upload, no-op deduplication, subpath assets, real images, rejection, save/reload, 25-row automatic export, edits, import validation, pending candidates and mobile layout.');
 } finally { await browser.close(); }
