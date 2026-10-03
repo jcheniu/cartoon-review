@@ -3,9 +3,8 @@
 The service validates the fixed dataset and round, durably saves drafts and JSONL, and automatically
 commits only complete changed groups to result/round_1/<session UUID>/<start>_<end>.jsonl on main.
 
-The updated production receiver is active. The supervisor/KV migration code is ready, but the
-production KV binding is awaiting owner approval; until migration is deployed the running legacy
-supervisor still uses GitHub discovery.
+The production receiver and signed KV supervisor are active. ENDPOINTS is bound to the dedicated
+cartoon-review-endpoints namespace; no process publishes service.json to GitHub.
 
 ## Run
 

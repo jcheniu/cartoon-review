@@ -7,16 +7,15 @@ The Worker forwards /health, /api/status and /api/reviews to the private SSH rec
 are forwarded only to allowlisted root HTTPS tunnel hosts; redirects are refused. GitHub credentials
 and validation remain on SSH. Existing browser annotations stay accessible on the unchanged website.
 
-**Migration status:** the dedicated namespace has been created, but its production Worker binding
-requires the owner's explicit approval. The production receiver already enforces complete-group
-commits; the legacy supervisor still publishes GitHub discovery until binding/code deployment and
-supervisor restart are completed.
+Production uses the ENDPOINTS binding to cartoon-review-endpoints. The signed KV Worker was
+deployed manually and the SSH supervisor switched on 2026-10-03. A real tunnel address change and
+duplicate signed publication were verified to leave GitHub's commit unchanged.
 
 ## Address updates without Git commits
 
 The ENDPOINTS binding uses the dedicated cartoon-review-endpoints KV namespace. It stores one public
 receiver address for the fixed round. The supervisor POSTs /api/endpoint with an RSA/SHA-256 signature;
-the Worker verifies the public key in worker.mjs, validates the hostname/round and a five-minute
+the update client uses an explicit application User-Agent; the Worker verifies the public key in worker.mjs, validates the hostname/round and a five-minute
 timestamp window, and awaits KV persistence. Identical addresses cause no extra KV writes.
 The endpoint signing private key remains in private SSH storage. No Cloudflare API token or GitHub
 credential is required by the Worker or the signed update client.

@@ -19,7 +19,9 @@ def publish(endpoint, key_path, opener=None):
     signed = subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(key_path)],
                             input=payload, capture_output=True, check=True, timeout=10).stdout
     request = Request(EDGE, data=payload, headers={
-        "Content-Type": "application/json", "X-Endpoint-Signature": base64.b64encode(signed).decode(),
+        "Content-Type": "application/json", "Accept": "application/json",
+        "User-Agent": "cartoon-review-address-publisher/1.0 (+https://github.com/jcheniu/cartoon-review)",
+        "X-Endpoint-Signature": base64.b64encode(signed).decode(),
     }, method="POST")
     with (opener or build_opener(NoRedirect())).open(request, timeout=15) as response:
         result = json.loads(response.read(4096))

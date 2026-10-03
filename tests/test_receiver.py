@@ -171,4 +171,45 @@ class ReceiverTests(unittest.TestCase):
         for row,item in zip(rows,self.items):row['image_number']=item['image_number']
         with self.assertRaises(ValueError):github_write(f'result/round_1/{self.session}/000_024.jsonl',''.join(canonical(r)+'\n' for r in rows))
 
+
+class EndpointPublisherTests(unittest.TestCase):
+    def test_request_is_signed_and_identifies_the_application(self):
+        import base64,io,subprocess
+        from endpoint import publish,EDGE
+        with tempfile.TemporaryDirectory() as directory:
+            key=pathlib.Path(directory)/'key.pem'
+            public=pathlib.Path(directory)/'public.pem'
+            signature=pathlib.Path(directory)/'signature.bin'
+            subprocess.run(['openssl','genpkey','-algorithm','RSA','-pkeyopt','rsa_keygen_bits:2048','-out',str(key)],
+                           capture_output=True,check=True)
+            subprocess.run(['openssl','pkey','-in',str(key),'-pubout','-out',str(public)],capture_output=True,check=True)
+            captured=[]
+            class Opener:
+                def open(self,request,timeout):
+                    captured.append(request)
+                    response=io.BytesIO(json.dumps(dict(status='ok',round_id='round-20260930T231132-d69c0f')).encode())
+                    response.status=200
+                    return response
+            publish('https://test.lhr.life',key,Opener())
+            request=captured[0]
+            self.assertEqual(request.full_url,EDGE)
+            self.assertTrue(request.get_header('User-agent').startswith('cartoon-review-address-publisher/'))
+            self.assertEqual(json.loads(request.data)['endpoint'],'https://test.lhr.life')
+            signature.write_bytes(base64.b64decode(request.get_header('X-endpoint-signature')))
+            result=subprocess.run(['openssl','dgst','-sha256','-verify',str(public),'-signature',str(signature)],
+                                  input=request.data,capture_output=True)
+            self.assertEqual(result.returncode,0,'The endpoint payload must have a valid RSA/SHA-256 signature')
+    def test_failed_acknowledgement_is_not_reported_as_published(self):
+        import io,subprocess
+        from endpoint import publish
+        with tempfile.TemporaryDirectory() as directory:
+            key=pathlib.Path(directory)/'key.pem'
+            subprocess.run(['openssl','genpkey','-algorithm','RSA','-pkeyopt','rsa_keygen_bits:2048','-out',str(key)],
+                           capture_output=True,check=True)
+            class Opener:
+                def open(self,request,timeout):
+                    response=io.BytesIO(b'{"status":"unavailable"}');response.status=503
+                    return response
+            with self.assertRaises(RuntimeError):publish('https://test.lhr.life',key,Opener())
+
 if __name__=='__main__':unittest.main()
