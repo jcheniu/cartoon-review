@@ -39,16 +39,17 @@ class ReceiverTests(unittest.TestCase):
         self.assertFalse(self.service.process_one())
         self.assertEqual(self.writes,[])
         self.assertEqual(len(self.service.snapshot_path(self.session,0,24).read_text().splitlines()),24)
-    def test_25_incremental_saves_make_one_commit_after_quiet_period(self):
-        for item in self.items:
+    def test_25_incremental_saves_commit_immediately_when_complete(self):
+        for index,item in enumerate(self.items):
             body=self.body_for(1);body['records']=[self.row_for(item)]
-            self.service.submit(body,self.key)
-            self.assertFalse(self.service.process_one())
+            result=self.service.submit(body,self.key)
+            if index<24:
+                self.assertFalse(self.service.process_one())
+            else:
+                self.assertEqual(result['ready_at'],self.now)
+                self.assertTrue(self.service.process_one())
             self.now+=1
-        self.now+=28
         self.assertFalse(self.service.process_one())
-        self.now+=1
-        self.assertTrue(self.service.process_one())
         self.assertEqual(len(self.writes),1)
         path,content=self.writes[0]
         self.assertEqual(path,f'result/round_1/{self.session}/000_024.jsonl')

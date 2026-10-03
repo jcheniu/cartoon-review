@@ -13,7 +13,7 @@
   <div class="header-links"><a href="./guide.html">操作说明 ↗</a><a href="https://github.com/jcheniu/cartoon-review" target="_blank" rel="noopener noreferrer">公开仓库 ↗</a></div>
 </header>
 <main>
-  <p class="storage-note">保存先保留草稿；满 25 张、JSONL 保存且内容变化后自动提交到公开 GitHub result/round_1。连续修改合并约 30 秒，每组标完自动下载 JSONL。</p>
+  <p class="storage-note">保存先保留草稿；满 25 张、JSONL 保存后首次立即提交到公开 GitHub result/round_1。已提交组的后续修改合并约 30 秒，每组标完自动下载 JSONL。</p>
   <section class="toolbar">
     <label>类别<select id="category"><option value="">全部输入</option><option value="animal">动物照片</option><option value="anime">动漫脸</option></select></label>
 
@@ -60,6 +60,6 @@
   <footer>250 张真实猫狗照片 + 250 张 CC0 合成动漫脸。固定训练／验证／测试划分；后续训练只能使用训练集中人工通过的目标。代码 MIT；图片许可见逐图来源。</footer>
 </main>
 <noscript>请启用 JavaScript 后使用标注工具。</noscript>
-<script type="module" src="./assets/app.mjs"></script>
+<script type="module" src="./assets/app.mjs?v=20261003-fast-upload"></script>
 </body>
 </html>

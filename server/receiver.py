@@ -292,7 +292,8 @@ class Receiver:
             raise ReviewError("Group not found", 404)
         return dict(state=row["state"], digest=row["digest"], url=row["url"],
                     count=len(row["content"].splitlines()), error=row["error"],
-                    ready_at=max(row["updated"] + self.quiet_seconds, row["retry_at"]),
+                    ready_at=max(row["updated"] + (self.quiet_seconds if row["published_digest"] else 0),
+                                 row["retry_at"]),
                     path=f"{DESTINATION}/{session}/{start:03d}_{end:03d}.jsonl")
 
     def process_one(self):
@@ -302,7 +303,7 @@ class Receiver:
             with self.lock, self.db() as db:
                 now = self.clock()
                 row = db.execute("""SELECT * FROM uploads WHERE state='pending' AND
-                    updated<=? AND retry_at<=? ORDER BY updated LIMIT 1""",
+                    (published_digest='' OR updated<=?) AND retry_at<=? ORDER BY updated LIMIT 1""",
                     (now - self.quiet_seconds, now)).fetchone()
                 if not row:
                     return False

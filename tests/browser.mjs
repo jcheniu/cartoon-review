@@ -17,7 +17,7 @@ try {
     }
     const body = route.request().postDataJSON();
     uploads.push(body);
-    return route.fulfill({headers, json: {state: body.records.length === 25 ? 'pending' : 'draft', count: body.records.length, digest: 'test', url: ''}});
+    return route.fulfill({headers, json: {state: body.records.length === 25 ? 'pending' : 'draft', count: body.records.length, ready_at: Date.now()/1000 + 30, digest: 'test', url: ''}});
   });
   await page.goto(url);
   await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('/ 500'));

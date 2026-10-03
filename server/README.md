@@ -37,8 +37,11 @@ The production CORS origin is https://jcheniu.github.io. Local tests may explici
 - Every changed save is validated, atomically written to a private JSONL snapshot, fsynced, and recorded
   in SQLite with FULL synchronous writes. Partial groups are drafts and never enter the Git publisher.
 - A group must contain exactly the 25 consecutive image numbers named by its range.
-- A complete group waits 30 seconds after its last actual content change before automatic commit.
-  Continuous edits reset that timer and are combined; successful writes remain paced at 15 seconds.
+- A first complete group enters the publisher immediately after its durable JSONL save. Edits to an
+  already published group wait 30 seconds after their last actual change; continuous edits are combined.
+  Successful writes remain paced at 15 seconds. Network failures can still delay completion.
+- The browser prioritizes complete groups, cancels obsolete snapshot requests and retry backoffs, and
+  sends new snapshots before polling publication. Publication polling never holds later groups in a loop.
 - Identical requests, timestamp/revision-only differences and returning to the previously published
   content create no commits. The GitHub writer independently rejects partial files and service.json.
 - The writer uses the saved JSONL snapshot. Changes received during a write remain pending.

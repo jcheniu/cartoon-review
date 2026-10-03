@@ -1,6 +1,14 @@
 import {rangeRows, rangeName} from './review.mjs';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+class Superseded extends Error {}
+function pause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(new Superseded()); };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, {once: true});
+  });
+}
 async function signature(rows) {
   const bytes = new TextEncoder().encode(JSON.stringify(rows.map(({review_version, reviewed_at, ...annotation}) => annotation)));
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -10,18 +18,7 @@ export async function createUploader({manifest, getState, onStatus}) {
   if (!response.ok) throw Error('上传配置暂时不可用');
   const config = await response.json();
   if (!config.endpoint || config.round_id !== manifest.round.id) throw Error('本轮上传服务尚未配置');
-  let endpoint = new URL(config.endpoint);
-  async function discover() {
-    if (!config.discovery_url) return;
-    try {
-      const url = new URL(config.discovery_url);
-      url.searchParams.set('t', String(Math.floor(Date.now() / 15000)));
-      const response = await fetch(url, {cache: 'no-store', signal: AbortSignal.timeout(10000)});
-      const next = await response.json();
-      if (response.ok && next.round_id === manifest.round.id && new URL(next.endpoint).protocol === 'https:') endpoint = new URL(next.endpoint);
-    } catch { /* Retain the last known endpoint and retry discovery later. */ }
-  }
-  await discover();
+  const endpoint = new URL(config.endpoint);
   if (endpoint.protocol !== 'https:') throw Error('上传服务必须使用 HTTPS');
   const session = getState().session;
   const keyName = 'cartoon-review-upload-key:' + session;
@@ -31,101 +28,129 @@ export async function createUploader({manifest, getState, onStatus}) {
     localStorage.setItem(keyName, key);
   }
   const metaKey = 'cartoon-review-upload-state:' + manifest.round.id + ':' + session;
-  let meta = JSON.parse(localStorage.getItem(metaKey) || '{"ranges":{},"uploaded":{}}');
+  const meta = JSON.parse(localStorage.getItem(metaKey) || '{"ranges":{},"uploaded":{}}');
   meta.saved ||= {};
   meta.pending ||= {};
-  let running = false, retry = null;
+  let running = false, retry = null, active = null;
   const persist = () => localStorage.setItem(metaKey, JSON.stringify(meta));
   const notify = (text, error = false, url = '') => onStatus({text, error, url});
-  const request = async (path, body) => {
+  async function request(path, body, signal) {
     let failure;
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal.aborted) throw new Superseded();
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      signal.addEventListener('abort', abort, {once: true});
+      const timer = setTimeout(abort, 20000);
       try {
         const result = await fetch(new URL(path, endpoint), {
           method: body ? 'POST' : 'GET',
           headers: {'X-Upload-Key': key, ...(body ? {'Content-Type': 'application/json'} : {})},
           body: body ? JSON.stringify(body) : undefined,
-          signal: AbortSignal.timeout(20000),
+          signal: controller.signal,
         });
         const json = await result.json();
+        if (signal.aborted) throw new Superseded();
         if (!result.ok) throw Error(json.error || '上传服务暂时不可用');
         return json;
-      } catch (error) { failure = error; await sleep(700 * (attempt + 1)); }
+      } catch (error) {
+        if (signal.aborted) throw new Superseded();
+        failure = error;
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+      }
+      if (attempt < 2) await pause(700 * (attempt + 1), signal);
     }
     throw failure;
-  };
+  }
+  async function queue() {
+    const entries = [];
+    for (const [name, range] of Object.entries(meta.ranges)) {
+      const rows = rangeRows(getState().reviews, range);
+      if (!rows.length) continue;
+      const digest = await signature(rows);
+      const send = Boolean(meta.pending[name]) || meta.saved[name] !== digest;
+      if (send || (rows.length === 25 && meta.uploaded[name] !== digest)) {
+        // Submit every new snapshot before polling GitHub publication.
+        entries.push({name, range, priority: send ? (rows.length === 25 ? 0 : 1) : 2});
+      }
+    }
+    return entries.sort((a, b) => a.priority - b.priority);
+  }
   async function pump() {
     if (running) return;
     running = true;
     clearTimeout(retry);
+    let delay = null;
     try {
-      for (const [name, range] of Object.entries(meta.ranges)) {
+      for (const {name, range} of await queue()) {
         const rows = rangeRows(getState().reviews, range);
-        if (!rows.length) continue;
         const currentSignature = await signature(rows);
-        const complete = rows.length === 25;
-        if (!meta.pending[name] && meta.saved[name] === currentSignature &&
-            (!complete || meta.uploaded[name] === currentSignature)) continue;
-        meta.pending[name] = currentSignature;
-        persist(); // An interrupted POST may already have changed the receiver's queued snapshot.
-        notify('正在保存 ' + name + '（' + rows.length + '/25）…');
-        let result = await request('/api/reviews', {session_id: session, range, records: rows});
-        if (!complete) {
-          delete meta.pending[name];
+        const send = Boolean(meta.pending[name]) || meta.saved[name] !== currentSignature;
+        active = {name, complete: rows.length === 25, send, controller: new AbortController()};
+        let result;
+        if (send) {
+          meta.pending[name] = currentSignature;
+          persist(); // A lost acknowledgement may still have changed the receiver's queued snapshot.
+          notify('正在保存 ' + name + '（' + rows.length + '/25）…');
+          result = await request('/api/reviews', {session_id: session, range, records: rows}, active.controller.signal);
           meta.saved[name] = currentSignature;
+          delete meta.pending[name];
+          persist();
+        } else {
+          result = await request('/api/status?session=' + session + '&start=' + range.start + '&end=' + range.end,
+            undefined, active.controller.signal);
+        }
+        active = null;
+        if (rows.length < 25) {
           delete meta.uploaded[name];
           persist();
           notify('已保存 ' + name + '（' + rows.length + '/25）；满 25 张后自动提交');
-          continue;
-        }
-        let changed = false;
-        for (let poll = 0; result.state !== 'uploaded'; poll++) {
-          notify('本组 JSONL 已保存，合并连续修改后自动提交 GitHub…');
-          await sleep(Math.min(3000 + poll * 500, 10000));
-          if (await signature(rangeRows(getState().reviews, range)) !== currentSignature) {
-            changed = true;
-            break;
-          }
-          result = await request('/api/status?session=' + session + '&start=' + range.start + '&end=' + range.end);
-          if (poll >= 30) throw Error('GitHub 写入排队中，稍后自动重试');
-        }
-        if (changed) continue;
-        if (result.count !== 25) throw Error('本组尚未满 25 张，不会创建提交');
-        delete meta.pending[name];
-        meta.uploaded[name] = currentSignature;
-        meta.saved[name] = currentSignature;
-        persist();
-        notify('已上传 ' + name + '（25/25）', false, result.url);
-      }
-      // Another save may have occurred while this request was in flight.
-      for (const [name, range] of Object.entries(meta.ranges)) {
-        const rows = rangeRows(getState().reviews, range);
-        const currentSignature = rows.length ? await signature(rows) : '';
-        if (rows.length && (meta.pending[name] || meta.saved[name] !== currentSignature ||
-            (rows.length === 25 && meta.uploaded[name] !== currentSignature))) {
-          retry = setTimeout(pump, 300);
-          break;
+        } else if (result.state === 'uploaded' && result.count === 25) {
+          meta.uploaded[name] = currentSignature;
+          persist();
+          notify('已上传 ' + name + '（25/25）', false, result.url);
+        } else {
+          // A pending response overrides an older cached publication, including a revert.
+          delete meta.uploaded[name];
+          persist();
+          const waiting = result.ready_at > Date.now() / 1000;
+          notify(name + ' JSONL 已保存；' + (result.error || (waiting
+            ? '合并连续修改后自动提交 GitHub…' : '正在提交 GitHub…')));
         }
       }
+      const remaining = await queue();
+      if (remaining.length) delay = remaining.some(entry => entry.priority < 2) ? 0 : 2000;
     } catch (error) {
-      notify('已保存在本浏览器；上传未完成，稍后自动重试。' + (error.message || ''), true);
-      discover().finally(() => { retry = setTimeout(pump, 15000); });
-    } finally { running = false; }
+      if (error instanceof Superseded) delay = 0;
+      else {
+        notify('已保存在本浏览器；上传未完成，稍后自动重试。' + (error.message || ''), true);
+        delay = 3000;
+      }
+    } finally {
+      active = null;
+      running = false;
+      if (delay !== null) { clearTimeout(retry); retry = setTimeout(pump, delay); }
+    }
   }
   function enqueue(range) {
-    meta.ranges[rangeName(range)] = {...range};
+    const name = rangeName(range);
+    meta.ranges[name] = {...range};
     persist();
+    const complete = rangeRows(getState().reviews, range).length === 25;
+    // Never keep retrying an obsolete draft while a newer complete group waits.
+    if (active && (active.name === name || (complete && (!active.complete || !active.send)))) active.controller.abort();
     clearTimeout(retry);
-    retry = setTimeout(pump, 500);
+    retry = setTimeout(pump, complete ? 0 : 500);
   }
   for (const row of Object.values(getState().reviews)) {
     const start = Math.floor(row.image_number / 25) * 25;
-    const range = {start, end: start + 24};
-    meta.ranges[rangeName(range)] = range;
+    meta.ranges[rangeName({start, end: start + 24})] = {start, end: start + 24};
   }
   persist();
   window.addEventListener('online', pump);
-  notify('自动上传已连接：满 25 张、JSONL 保存后自动提交 GitHub');
+  notify('自动上传已连接：满 25 张、JSONL 保存后立即提交 GitHub');
   pump();
   return {enqueue};
 }

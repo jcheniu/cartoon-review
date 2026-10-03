@@ -2,7 +2,7 @@
 
 UTF-8; one JSON object per line, with a trailing newline. Rows are sorted by image_number.
 The group filename uses three-digit inclusive bounds, e.g. 000_024.jsonl or 450_474.jsonl.
-Manual exports can contain fewer than 25 rows. New automatic GitHub commits require all 25 rows, a durable server JSONL snapshot, changed annotation content, and a 30-second quiet period. Files use result/round_1/<upload-session>/<start>_<end>.jsonl on main. Earlier partial files remain as historical annotations.
+Manual exports can contain fewer than 25 rows. New automatic GitHub commits require all 25 rows, a durable server JSONL snapshot, and changed annotation content. The first complete group is queued immediately; edits to an already published group use a 30-second quiet period. Files use result/round_1/<upload-session>/<start>_<end>.jsonl on main. Earlier partial files remain as historical annotations.
 
 | Field | Meaning |
 | --- | --- |

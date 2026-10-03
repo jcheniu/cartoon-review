@@ -1,4 +1,4 @@
-import {createUploader} from './upload.mjs';
+import {createUploader} from './upload.mjs?v=20261003-fast-upload';
 import {parseRange, shiftRange} from './ranges.mjs';
 import {pad, rangeName, choiceOf, makeReview, validateImported, rangeRows} from './review.mjs';
 
