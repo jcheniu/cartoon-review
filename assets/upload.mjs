@@ -31,7 +31,8 @@ export async function createUploader({manifest, getState, onStatus}) {
   const meta = JSON.parse(localStorage.getItem(metaKey) || '{"ranges":{},"uploaded":{}}');
   meta.saved ||= {};
   meta.pending ||= {};
-  let running = false, retry = null, active = null;
+  let scheduling = false, retry = null;
+  const active = new Map(), retryAt = new Map();
   const persist = () => localStorage.setItem(metaKey, JSON.stringify(meta));
   const notify = (text, error = false, url = '') => onStatus({text, error, url});
   async function request(path, body, signal) {
@@ -78,71 +79,79 @@ export async function createUploader({manifest, getState, onStatus}) {
     }
     return entries.sort((a, b) => a.priority - b.priority);
   }
-  async function pump() {
-    if (running) return;
-    running = true;
-    clearTimeout(retry);
-    let delay = null;
+  async function runGroup({name, range}, controller) {
+    let delay = 0;
     try {
-      for (const {name, range} of await queue()) {
-        const rows = rangeRows(getState().reviews, range);
-        const currentSignature = await signature(rows);
-        const send = Boolean(meta.pending[name]) || meta.saved[name] !== currentSignature;
-        active = {name, complete: rows.length === 25, send, controller: new AbortController()};
-        let result;
-        if (send) {
-          meta.pending[name] = currentSignature;
-          persist(); // A lost acknowledgement may still have changed the receiver's queued snapshot.
-          notify('正在保存 ' + name + '（' + rows.length + '/25）…');
-          result = await request('/api/reviews', {session_id: session, range, records: rows}, active.controller.signal);
-          meta.saved[name] = currentSignature;
-          delete meta.pending[name];
-          persist();
-        } else {
-          result = await request('/api/status?session=' + session + '&start=' + range.start + '&end=' + range.end,
-            undefined, active.controller.signal);
-        }
-        active = null;
-        if (rows.length < 25) {
-          delete meta.uploaded[name];
-          persist();
-          notify('已保存 ' + name + '（' + rows.length + '/25）；满 25 张后自动提交');
-        } else if (result.state === 'uploaded' && result.count === 25) {
-          meta.uploaded[name] = currentSignature;
-          persist();
-          notify('已上传 ' + name + '（25/25）', false, result.url);
-        } else {
-          // A pending response overrides an older cached publication, including a revert.
-          delete meta.uploaded[name];
-          persist();
-          const waiting = result.ready_at > Date.now() / 1000;
-          notify(name + ' JSONL 已保存；' + (result.error || (waiting
-            ? '合并连续修改后自动提交 GitHub…' : '正在提交 GitHub…')));
-        }
+      const rows = rangeRows(getState().reviews, range);
+      const currentSignature = await signature(rows);
+      const send = Boolean(meta.pending[name]) || meta.saved[name] !== currentSignature;
+      let result;
+      if (send) {
+        meta.pending[name] = currentSignature;
+        persist();
+        notify('正在保存 ' + name + '（' + rows.length + '/25）…');
+        result = await request('/api/reviews', {session_id: session, range, records: rows}, controller.signal);
+        meta.saved[name] = currentSignature;
+        delete meta.pending[name];
+        persist();
+      } else {
+        result = await request('/api/status?session=' + session + '&start=' + range.start + '&end=' + range.end,
+          undefined, controller.signal);
       }
-      const remaining = await queue();
-      if (remaining.length) delay = remaining.some(entry => entry.priority < 2) ? 0 : 2000;
+      if (rows.length < 25) {
+        delete meta.uploaded[name];
+        persist();
+        notify('已保存 ' + name + '（' + rows.length + '/25）；满 25 张后自动提交');
+      } else if (result.state === 'uploaded' && result.count === 25) {
+        meta.uploaded[name] = currentSignature;
+        persist();
+        notify('已上传 ' + name + '（25/25）', false, result.url);
+      } else {
+        delete meta.uploaded[name];
+        persist();
+        delay = 2000;
+        notify(name + ' JSONL 已保存；' + (result.error || (result.ready_at > Date.now()/1000
+          ? '合并连续修改后自动提交 GitHub…' : '正在提交 GitHub…')));
+      }
     } catch (error) {
-      if (error instanceof Superseded) delay = 0;
-      else {
-        notify('已保存在本浏览器；上传未完成，稍后自动重试。' + (error.message || ''), true);
+      if (!(error instanceof Superseded)) {
+        notify(name + ' 已保存在本浏览器；上传未完成，稍后自动重试。' + (error.message || ''), true);
         delay = 3000;
       }
     } finally {
-      active = null;
-      running = false;
-      if (delay !== null) { clearTimeout(retry); retry = setTimeout(pump, delay); }
+      active.delete(name);
+      retryAt.set(name, Date.now() + delay);
+      pump();
     }
+  }
+  async function pump() {
+    if (scheduling) return;
+    scheduling = true;
+    clearTimeout(retry);
+    try {
+      const entries = await queue();
+      for (const entry of entries) {
+        if (active.size >= 4) break;
+        if (active.has(entry.name) || (retryAt.get(entry.name) || 0) > Date.now()) continue;
+        const controller = new AbortController();
+        active.set(entry.name, controller);
+        runGroup(entry, controller);
+      }
+      if (active.size < 4) {
+        const next = entries.filter(entry => !active.has(entry.name))
+          .map(entry => Math.max(0, (retryAt.get(entry.name) || 0) - Date.now()));
+        if (next.length) retry = setTimeout(pump, Math.max(10, Math.min(...next)));
+      }
+    } finally { scheduling = false; }
   }
   function enqueue(range) {
     const name = rangeName(range);
     meta.ranges[name] = {...range};
     persist();
-    const complete = rangeRows(getState().reviews, range).length === 25;
-    // Never keep retrying an obsolete draft while a newer complete group waits.
-    if (active && (active.name === name || (complete && (!active.complete || !active.send)))) active.controller.abort();
+    retryAt.set(name, 0);
+    active.get(name)?.abort();
     clearTimeout(retry);
-    retry = setTimeout(pump, complete ? 0 : 500);
+    retry = setTimeout(pump, rangeRows(getState().reviews, range).length === 25 ? 0 : 500);
   }
   for (const row of Object.values(getState().reviews)) {
     const start = Math.floor(row.image_number / 25) * 25;

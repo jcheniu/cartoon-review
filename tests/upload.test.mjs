@@ -101,34 +101,27 @@ test('all complete groups are submitted before waiting for publication', async t
   assert.ok(statuses.every(s => !s.error));
 });
 
-test('a newer full group interrupts older publication polling', async t => {
+test('another full group uploads while an older full POST is stalled', async t => {
   environment(t);
-  const state = {session: 'poll-session', reviews: Object.fromEntries(Array.from({length: 25}, (_, i) => [row(i).photo_id, row(i)]))};
-  const requests = [], statuses = [];
-  let polling = false, cancelled = false;
+  const state = {session: 'parallel-session', reviews: Object.fromEntries(Array.from({length: 25}, (_, i) => [row(i).photo_id, row(i)]))};
+  const posts = [], statuses = [];
+  let resolveFirst;
   fetch.mock.mockImplementation(async (url, options) => {
     if (String(url).endsWith('upload-config.json')) return reply({endpoint: 'https://upload.example', round_id: manifest.round.id});
-    if (options.method === 'POST') {
-      const start = JSON.parse(options.body).range.start;
-      requests.push('POST ' + start);
-      return reply({state: start ? 'uploaded' : 'pending', count: 25});
-    }
-    requests.push('GET 0');
-    if (!polling) {
-      polling = true;
-      return new Promise((_, reject) => options.signal.addEventListener('abort', () => {
-        cancelled = true; reject(new DOMException('Aborted', 'AbortError'));
-      }, {once: true}));
-    }
+    const start = JSON.parse(options.body).range.start;
+    posts.push(start);
+    if (start === 0) return new Promise(resolve => { resolveFirst = resolve; });
     return reply({state: 'uploaded', count: 25});
   });
   const uploader = await createUploader({manifest, getState: () => state, onStatus: s => statuses.push(s)});
-  await until(() => polling);
+  await until(() => resolveFirst);
   for (let i = 25; i < 50; i++) state.reviews[row(i).photo_id] = row(i);
   uploader.enqueue({start: 25, end: 49});
-  await until(() => statuses.filter(s => s.text.startsWith('已上传')).length === 2);
-  assert.equal(cancelled, true);
-  assert.deepEqual(requests, ['POST 0', 'GET 0', 'POST 25', 'GET 0']);
+  await until(() => statuses.some(s => s.text.startsWith('已上传 025_049')));
+  assert.deepEqual(posts, [0, 25]);
+  assert.equal(statuses.some(s => s.text.startsWith('已上传 000_024')), false);
+  resolveFirst(reply({state: 'uploaded', count: 25}));
+  await until(() => statuses.some(s => s.text.startsWith('已上传 000_024')));
 });
 
 test('a pending revert invalidates cached publication and is polled to completion', async t => {

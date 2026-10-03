@@ -58,6 +58,7 @@ JSONL 保留 a/b/both/neither、偏好、颜色／姿态原因、描述、编号
 打开 http://localhost:8000/ 。直接双击 index.html 无法读取数据清单。
 本地副本仍可保存和导出；自动上传默认仅接受生产站点来源。
 固定上传入口为 https://api.asuperstrongfrog.com；网页地址继续使用 GitHub Pages。
+各组独立重试；上一组等待保存或提交时，其他组仍可上传。
 接收服务及部署说明见 [server/README.md](server/README.md)，固定域名维护见 [edge/README.md](edge/README.md)。
 
 刷新生成快照（替换占位内容）：
@@ -69,7 +70,7 @@ JSONL 保留 a/b/both/neither、偏好、颜色／姿态原因、描述、编号
 同一轮新增候选不会重置已有浏览器标注。
 
 main 保存源码、数据和上传结果；GitHub Pages 从 gh-pages 分支发布。
-更新页面或候选时，先在服务的 GitHub 写入锁内拉取 main，再提交并将同一提交推送到 main 和 gh-pages。
+更新页面或候选时，先在服务本机运行目录的 GitHub 写入锁内拉取 main，再提交并将同一提交推送到 main 和 gh-pages。
 只有结果上传时更新 main，避免每条标注触发网页重建。
 
 ## 验证
@@ -77,7 +78,7 @@ main 保存源码、数据和上传结果；GitHub Pages 从 gh-pages 分支发�
     npm install
     npm test
     python scripts/verify_snapshot.py
-    python -m unittest discover -s tests -p "test_receiver.py" -v
+    python -m unittest discover -s tests -p "test_*.py" -v
     npx playwright install chromium
 
 运行本地 HTTP 服务后执行 npm run test:browser。

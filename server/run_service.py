@@ -11,12 +11,13 @@ import signal
 import subprocess
 import sys
 import time
-from receiver import ROOT, ROUND
+from receiver import ROOT, ROUND, ensure_local_runtime
 from endpoint import publish
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--runtime-dir", type=Path, required=True, help="Local filesystem for process locks")
     parser.add_argument("--port", type=int, default=7121)
     args = parser.parse_args()
     directory = args.data_dir.resolve()
@@ -24,7 +25,12 @@ def main():
         raise SystemExit("Private state must be outside the public repository")
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
-    supervisor_lock = (directory / "supervisor.lock").open("a")
+    runtime = args.runtime_dir.resolve()
+    if runtime.is_relative_to(ROOT):
+        raise SystemExit("Runtime locks must be outside the public repository")
+    runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ensure_local_runtime(runtime)
+    supervisor_lock = (runtime / "supervisor.lock").open("a")
     fcntl.flock(supervisor_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     key_path = directory / "endpoint-signing.pem"
     if not key_path.is_file():
@@ -44,7 +50,7 @@ def main():
         while active:
             if receiver is None or receiver.poll() is not None:
                 receiver = subprocess.Popen([sys.executable, "-u", str(ROOT / "server/receiver.py"),
-                    "--data-dir", str(directory), "--port", str(args.port)],
+                    "--data-dir", str(directory), "--runtime-dir", str(runtime), "--port", str(args.port)],
                     stdout=receiver_log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
                 print("Receiver started", flush=True)
             if tunnel is None or tunnel.poll() is not None:

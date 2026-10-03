@@ -13,6 +13,7 @@ import re
 import sqlite3
 import subprocess
 import threading
+import tempfile
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -154,98 +155,211 @@ def github_write(path, content):
                 raise
             time.sleep(2 * (attempt + 1))
 
+def ensure_local_runtime(path):
+    mountinfo = Path("/proc/self/mountinfo")
+    if not mountinfo.exists():
+        return
+    resolved = Path(path).resolve()
+    matches = []
+    for line in mountinfo.read_text().splitlines():
+        fields = line.split()
+        mount = Path(fields[4].replace("\\040", " "))
+        if resolved == mount or mount in resolved.parents:
+            matches.append((len(str(mount)), fields[fields.index("-")+1]))
+    filesystem = max(matches)[1] if matches else ""
+    if filesystem in ("nfs", "nfs4", "cifs", "smb3", "fuse.sshfs", "9p"):
+        raise RuntimeError("Runtime locks require a local filesystem; use --runtime-dir")
+
+def atomic_text(path, content):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_name(path.name + "." + str(threading.get_ident()) + ".tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        os.chmod(temporary, 0o600)
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def persist_record(directory, row):
+    metadata = {k: v for k, v in row.items() if k != "content"}
+    atomic_text(Path(directory) / "state" / row["session"] /
+                f"{row['start']:03d}_{row['end']:03d}.json", canonical(metadata))
+
+def migrate_database(database, directory):
+    """Explicit offline migration from a consistent SQLite snapshot; never publishes labels."""
+    directory = Path(directory)
+    ensure_local_runtime(Path(database).parent)
+    if (directory / "format.json").exists():
+        raise RuntimeError("Durable JSON storage already exists; preserve it")
+    with sqlite3.connect("file:" + str(Path(database).resolve()) + "?mode=ro", uri=True) as db:
+        db.row_factory = sqlite3.Row
+        sessions = db.execute("SELECT id,key_hash FROM sessions").fetchall()
+        rows = db.execute("SELECT * FROM uploads").fetchall()
+    for session in sessions:
+        if not UUID.fullmatch(session["id"]) or not re.fullmatch(r"[a-f0-9]{64}", session["key_hash"]):
+            raise RuntimeError("Invalid legacy session")
+        atomic_text(directory / "sessions" / (session["id"] + ".json"), canonical(dict(session)))
+    for legacy in rows:
+        row = dict(legacy)
+        bounds(dict(start=row["start"], end=row["end"]))
+        if row["session"] not in {s["id"] for s in sessions}:
+            raise RuntimeError("Missing legacy session")
+        digest = annotation_digest(row["content"])
+        row.setdefault("published_digest", digest if row["state"] == "uploaded" else "")
+        row.setdefault("retry_at", 0)
+        row["digest"] = digest
+        path = directory / "jsonl" / row["session"] / f"{row['start']:03d}_{row['end']:03d}.jsonl"
+        # Existing durable JSONL can be newer than the database snapshot.
+        if not path.exists():
+            atomic_text(path, row["content"])
+        persist_record(directory, row)
+    known = {s["id"] for s in sessions}
+    if any(p.parent.name not in known for p in (directory / "jsonl").glob("*/*.jsonl")):
+        raise RuntimeError("A durable group has no session key in the migration snapshot")
+    atomic_text(directory / "format.json", canonical(dict(version=2, storage="durable-jsonl")))
+    return dict(sessions=len(sessions), groups=len(rows))
+
 class Receiver:
     def __init__(self, data_dir, manifest_path=ROOT / "data/manifest.json", writer=github_write,
-                 clock=time.time, quiet_seconds=30, retry_seconds=60):
+                 clock=time.time, quiet_seconds=30, retry_seconds=60, runtime_dir=None):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.data_dir, 0o700)
-        self.db_path = self.data_dir / "uploads.sqlite3"
-        self.manifest_path, self.writer = Path(manifest_path), writer
+        self.runtime_temp = tempfile.TemporaryDirectory(prefix="cartoon-review-runtime-") if runtime_dir is None else None
+        self.runtime_dir = Path(runtime_dir) if runtime_dir else Path(self.runtime_temp.name)
+        self.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        ensure_local_runtime(self.runtime_dir)
+        self.manifest = json.loads(Path(manifest_path).read_text())
+        self.writer = writer
         self.clock, self.quiet_seconds, self.retry_seconds = clock, quiet_seconds, retry_seconds
-        self.wake = threading.Event()
+        self.wake, self.metadata_wake = threading.Event(), threading.Event()
         self.lock = threading.RLock()
-        self.rate = {}
+        self.rate, self.group_locks, self.session_locks = {}, {}, {}
+        self.active_saves, self.dirty = {}, set()
+        self.flushing_since = 0
+        # SQLite is only an in-memory index. No database, WAL, SHM or SQLite locks touch NFS.
+        self.db_uri = "file:cartoon-review-" + str(id(self)) + "?mode=memory&cache=shared"
+        self.anchor = sqlite3.connect(self.db_uri, uri=True, check_same_thread=False)
+        marker = self.data_dir / "format.json"
+        if not marker.exists() and (self.data_dir / "uploads.sqlite3").exists():
+            raise RuntimeError("Migrate the legacy database before starting durable JSON storage")
+        if marker.exists() and json.loads(marker.read_text()).get("version") != 2:
+            raise RuntimeError("Unsupported durable storage format")
         with self.db() as db:
             db.executescript("""
-                CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, key_hash TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS uploads(
-                    session TEXT, start INTEGER, end INTEGER, content TEXT, digest TEXT,
-                    state TEXT, url TEXT, error TEXT, updated REAL,
-                    published_digest TEXT NOT NULL DEFAULT '', retry_at REAL NOT NULL DEFAULT 0,
+                CREATE TABLE sessions(id TEXT PRIMARY KEY, key_hash TEXT NOT NULL);
+                CREATE TABLE uploads(
+                    session TEXT,start INTEGER,end INTEGER,content TEXT,digest TEXT,
+                    state TEXT,url TEXT,error TEXT,updated REAL,
+                    published_digest TEXT NOT NULL DEFAULT '',retry_at REAL NOT NULL DEFAULT 0,
                     PRIMARY KEY(session,start,end));
             """)
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(uploads)")}
-            migrate = "published_digest" not in columns
-            if migrate:
-                db.execute("ALTER TABLE uploads ADD COLUMN published_digest TEXT NOT NULL DEFAULT ''")
-            if "retry_at" not in columns:
-                db.execute("ALTER TABLE uploads ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
-            for row in db.execute("SELECT * FROM uploads").fetchall():
-                digest = annotation_digest(row["content"])
-                state = row["state"] if complete(row["content"], row["start"], row["end"]) else "draft"
-                published = digest if migrate and row["state"] == "uploaded" else row["published_digest"]
-                db.execute("UPDATE uploads SET digest=?,state=?,published_digest=? WHERE session=? AND start=? AND end=?",
-                           (digest, state, published, row["session"], row["start"], row["end"]))
-                self.save_snapshot(row["session"], row["start"], row["end"], row["content"])
-        os.chmod(self.db_path, 0o600)
+            for path in (self.data_dir / "sessions").glob("*.json"):
+                value = json.loads(path.read_text())
+                if path.stem != value["id"] or not UUID.fullmatch(value["id"]) or not re.fullmatch(r"[a-f0-9]{64}", value["key_hash"]):
+                    raise RuntimeError("Invalid durable session")
+                db.execute("INSERT INTO sessions VALUES(?,?)", (value["id"], value["key_hash"]))
+            for path in (self.data_dir / "jsonl").glob("*/*.jsonl"):
+                session = path.parent.name
+                match = re.fullmatch(r"(\d{3})_(\d{3})\.jsonl", path.name)
+                if not UUID.fullmatch(session) or not match:
+                    raise RuntimeError("Invalid durable group path")
+                if not db.execute("SELECT 1 FROM sessions WHERE id=?", (session,)).fetchone():
+                    raise RuntimeError("Durable group is missing its session key")
+                start, end = map(int, match.groups())
+                bounds(dict(start=start, end=end))
+                content = path.read_text()
+                parsed = [json.loads(line) for line in content.splitlines() if line.strip()]
+                cleaned = validate_rows(self.manifest, parsed, start, end)
+                content = "".join(canonical(row) + "\n" for row in cleaned)
+                digest = annotation_digest(content)
+                meta_path = self.data_dir / "state" / session / path.with_suffix(".json").name
+                old = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                published = old.get("published_digest", "")
+                same = old.get("digest") == digest
+                row = dict(session=session, start=start, end=end, content=content, digest=digest,
+                    state=("uploaded" if digest == published else "pending") if complete(content,start,end) else "draft",
+                    url=old.get("url", ""), error=old.get("error", "") if same else "",
+                    updated=old.get("updated", path.stat().st_mtime) if same else path.stat().st_mtime,
+                    published_digest=published, retry_at=old.get("retry_at", 0) if same else 0)
+                self.put(db, row)
+        if not marker.exists():
+            atomic_text(marker, canonical(dict(version=2, storage="durable-jsonl")))
+
+    def close(self):
+        self.anchor.close()
+        if self.runtime_temp:
+            self.runtime_temp.cleanup()
 
     @contextlib.contextmanager
     def db(self):
-        db = sqlite3.connect(self.db_path, timeout=30)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA synchronous=FULL")
-        try:
-            yield db
-            db.commit()
-        finally:
-            db.close()
+        with self.lock:
+            db = sqlite3.connect(self.db_uri, uri=True)
+            db.row_factory = sqlite3.Row
+            try:
+                yield db
+                db.commit()
+            finally:
+                db.close()
+
+    def put(self, db, row):
+        columns = ("session","start","end","content","digest","state","url","error","updated","published_digest","retry_at")
+        db.execute("INSERT OR REPLACE INTO uploads VALUES(?,?,?,?,?,?,?,?,?,?,?)", tuple(row[k] for k in columns))
 
     def snapshot_path(self, session, start, end):
         return self.data_dir / "jsonl" / session / f"{start:03d}_{end:03d}.jsonl"
 
     def save_snapshot(self, session, start, end, content):
-        path = self.snapshot_path(session, start, end)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.read_text() == content:
-            return
-        temporary = path.with_suffix(".jsonl.tmp")
-        with temporary.open("w", encoding="utf-8") as stream:
-            os.chmod(temporary, 0o600)
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        atomic_text(self.snapshot_path(session, start, end), content)
 
-    def authenticate(self, db, session, key, create=False):
+    def authenticate(self, db, session, key):
         if not isinstance(session, str) or not UUID.fullmatch(session) or not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key):
             raise ReviewError("Invalid upload session", 403)
-        record = db.execute("SELECT key_hash FROM sessions WHERE id=?", (session,)).fetchone()
-        digest = sha(key)
-        if record:
-            if not hmac.compare_digest(record["key_hash"], digest):
-                raise ReviewError("Upload session key does not match", 403)
-        elif create:
+        row = db.execute("SELECT key_hash FROM sessions WHERE id=?", (session,)).fetchone()
+        if not row:
+            raise ReviewError("Unknown upload session", 404)
+        if not hmac.compare_digest(row["key_hash"], sha(key)):
+            raise ReviewError("Upload session key does not match", 403)
+
+    def ensure_session(self, session, key):
+        with self.db() as db:
+            try:
+                self.authenticate(db, session, key)
+                return
+            except ReviewError as error:
+                if error.status != 404:
+                    raise
             if db.execute("SELECT count(*) FROM sessions").fetchone()[0] >= 1000:
                 raise ReviewError("Receiver capacity reached", 429)
-            db.execute("INSERT INTO sessions VALUES(?,?)", (session, digest))
-        else:
-            raise ReviewError("Unknown upload session", 404)
+            lock = self.session_locks.setdefault(session, threading.Lock())
+        if not lock.acquire(blocking=False):
+            raise ReviewError("Session is being saved; retry shortly", 503)
+        try:
+            with self.db() as db:
+                if db.execute("SELECT 1 FROM sessions WHERE id=?", (session,)).fetchone():
+                    return self.authenticate(db, session, key)
+            atomic_text(self.data_dir / "sessions" / (session + ".json"),
+                        canonical(dict(id=session, key_hash=sha(key))))
+            with self.db() as db:
+                db.execute("INSERT INTO sessions VALUES(?,?)", (session, sha(key)))
+        finally:
+            lock.release()
 
     def submit(self, body, key, ip="local"):
         if not isinstance(body, dict):
             raise ReviewError("Invalid request")
         session = body.get("session_id")
         start, end = bounds(body.get("range"))
-        manifest = json.loads(self.manifest_path.read_text())
-        records = validate_rows(manifest, body.get("records"), start, end)
-        with self.lock, self.db() as db:
+        records = validate_rows(self.manifest, body.get("records"), start, end)
+        self.ensure_session(session, key)
+        identity = (session, start, end)
+        with self.db() as db:
             now = self.clock()
             recent = [stamp for stamp in self.rate.get(ip, []) if now - stamp < 60]
             if len(recent) >= 120:
@@ -253,94 +367,156 @@ class Receiver:
             self.rate[ip] = recent + [now]
             if len(self.rate) > 1000:
                 self.rate = {address: stamps for address, stamps in self.rate.items() if now - stamps[-1] < 60}
-            self.authenticate(db, session, key, create=True)
-            previous = db.execute("SELECT * FROM uploads WHERE session=? AND start=? AND end=?", (session, start, end)).fetchone()
-            merged = {row["photo_id"]: row for row in map(json.loads, previous["content"].splitlines())} if previous else {}
-            for row in records:
-                old = merged.get(row["photo_id"])
-                if old and old["annotation_session_id"] == row["annotation_session_id"] and old["review_version"] > row["review_version"]:
-                    raise ReviewError("A newer review is already uploaded; import the latest JSONL", 409)
-                merged[row["photo_id"]] = row
-            content = "".join(canonical(row) + "\n" for row in sorted(merged.values(), key=lambda r: r["image_number"]))
-            digest = annotation_digest(content)
-            changed = not previous or previous["digest"] != digest
-            # Durable JSONL must exist before the queue can make this snapshot publishable.
-            self.save_snapshot(session, start, end, content)
-            if changed:
+            previous = db.execute("SELECT content FROM uploads WHERE session=? AND start=? AND end=?", identity).fetchone()
+            if previous:
+                saved = {r["photo_id"]: r for r in map(json.loads, previous["content"].splitlines())}
+                if all(saved.get(r["photo_id"]) == r for r in records):
+                    return self.status(session, start, end, key)
+            group_lock = self.group_locks.setdefault(identity, threading.Lock())
+        if not group_lock.acquire(blocking=False):
+            raise ReviewError("本组正在持久保存，稍后自动重试；其他组可继续上传", 503)
+        try:
+            with self.db() as db:
+                previous = db.execute("SELECT * FROM uploads WHERE session=? AND start=? AND end=?", identity).fetchone()
+                previous = dict(previous) if previous else None
+                merged = {r["photo_id"]: r for r in map(json.loads, previous["content"].splitlines())} if previous else {}
+                for row in records:
+                    old = merged.get(row["photo_id"])
+                    if old and old["annotation_session_id"] == row["annotation_session_id"] and old["review_version"] > row["review_version"]:
+                        raise ReviewError("A newer review is already uploaded; import the latest JSONL", 409)
+                    merged[row["photo_id"]] = row
+                content = "".join(canonical(row) + "\n" for row in sorted(merged.values(), key=lambda r: r["image_number"]))
+                if previous and previous["content"] == content:
+                    return self.status(session, start, end, key)
+                digest = annotation_digest(content)
+                changed = not previous or previous["digest"] != digest
                 published = previous["published_digest"] if previous else ""
-                state = ("uploaded" if digest == published else "pending") if complete(content, start, end) else "draft"
-                db.execute("""INSERT INTO uploads
-                    (session,start,end,content,digest,state,url,error,updated,published_digest,retry_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,0)
-                    ON CONFLICT(session,start,end) DO UPDATE SET
-                    content=excluded.content,digest=excluded.digest,state=excluded.state,
-                    error='',updated=excluded.updated,retry_at=0""",
-                    (session, start, end, content, digest, state, previous["url"] if previous else "", "", now, published))
-            elif previous["content"] != content:
-                # Record the newest revision locally without resetting the quiet period or committing metadata.
-                db.execute("UPDATE uploads SET content=? WHERE session=? AND start=? AND end=?",
-                           (content, session, start, end))
-        self.wake.set()
-        return self.status(session, start, end, key)
+                record = dict(session=session, start=start, end=end, content=content, digest=digest,
+                    state=("uploaded" if digest == published else "pending") if complete(content,start,end) else "draft",
+                    url=previous["url"] if previous else "", error="" if changed else previous["error"],
+                    updated=now if changed else previous["updated"], published_digest=published,
+                    retry_at=0 if changed else previous["retry_at"])
+                self.active_saves[identity] = self.clock()
+            # Network filesystem I/O is outside the shared index lock and isolated to this group.
+            self.save_snapshot(session, start, end, content)
+            persist_record(self.data_dir, record)
+            with self.db() as db:
+                current = db.execute("SELECT * FROM uploads WHERE session=? AND start=? AND end=?", identity).fetchone()
+                if current and (current["published_digest"], current["url"]) != (record["published_digest"], record["url"]):
+                    record.update(published_digest=current["published_digest"], url=current["url"])
+                    record["state"] = ("uploaded" if digest == current["published_digest"] else "pending") if complete(content,start,end) else "draft"
+                    self.dirty.add(identity)
+                    self.metadata_wake.set()
+                self.put(db, record)
+            self.wake.set()
+            return self.status(session, start, end, key)
+        finally:
+            with self.lock:
+                self.active_saves.pop(identity, None)
+            group_lock.release()
 
     def status(self, session, start, end, key):
         bounds(dict(start=start, end=end))
         with self.db() as db:
             self.authenticate(db, session, key)
-            row = db.execute("SELECT * FROM uploads WHERE session=? AND start=? AND end=?", (session, start, end)).fetchone()
-        if not row:
-            raise ReviewError("Group not found", 404)
-        return dict(state=row["state"], digest=row["digest"], url=row["url"],
-                    count=len(row["content"].splitlines()), error=row["error"],
-                    ready_at=max(row["updated"] + (self.quiet_seconds if row["published_digest"] else 0),
-                                 row["retry_at"]),
-                    path=f"{DESTINATION}/{session}/{start:03d}_{end:03d}.jsonl")
+            row = db.execute("SELECT * FROM uploads WHERE session=? AND start=? AND end=?", (session,start,end)).fetchone()
+            if not row:
+                raise ReviewError("Group not found", 404)
+            return dict(state=row["state"], digest=row["digest"], url=row["url"],
+                        count=len(row["content"].splitlines()), error=row["error"],
+                        ready_at=max(row["updated"] + (self.quiet_seconds if row["published_digest"] else 0), row["retry_at"]),
+                        path=f"{DESTINATION}/{session}/{start:03d}_{end:03d}.jsonl")
 
     def process_one(self):
-        # Re-read after obtaining the publisher lock so a queued old snapshot cannot bypass debounce.
-        with (self.data_dir / "github-write.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            with self.lock, self.db() as db:
+        with (self.runtime_dir / "github-write.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            with self.db() as db:
                 now = self.clock()
-                row = db.execute("""SELECT * FROM uploads WHERE state='pending' AND
-                    (published_digest='' OR updated<=?) AND retry_at<=? ORDER BY updated LIMIT 1""",
-                    (now - self.quiet_seconds, now)).fetchone()
+                candidates = db.execute("""SELECT * FROM uploads WHERE state='pending' AND
+                    (published_digest='' OR updated<=?) AND retry_at<=? ORDER BY updated""",
+                    (now-self.quiet_seconds, now)).fetchall()
+                row = next((dict(r) for r in candidates
+                    if (r["session"],r["start"],r["end"]) not in self.active_saves), None)
                 if not row:
                     return False
+                identity = (row["session"], row["start"], row["end"])
                 if not complete(row["content"], row["start"], row["end"]):
-                    db.execute("UPDATE uploads SET state='draft' WHERE session=? AND start=? AND end=?",
-                               (row["session"], row["start"], row["end"]))
+                    db.execute("UPDATE uploads SET state='draft' WHERE session=? AND start=? AND end=?", identity)
+                    self.dirty.add(identity)
+                    self.metadata_wake.set()
                     return False
-                if row["digest"] == row["published_digest"]:
-                    db.execute("UPDATE uploads SET state='uploaded' WHERE session=? AND start=? AND end=?",
-                               (row["session"], row["start"], row["end"]))
-                    return False
-                self.save_snapshot(row["session"], row["start"], row["end"], row["content"])
-                content = self.snapshot_path(row["session"], row["start"], row["end"]).read_text()
-                if content != row["content"]:
-                    raise RuntimeError("JSONL snapshot mismatch")
             path = f"{DESTINATION}/{row['session']}/{row['start']:03d}_{row['end']:03d}.jsonl"
             try:
-                url = self.writer(path, content)
-                with self.lock, self.db() as db:
+                # The immutable index row is installed only after its JSONL has been fsynced.
+                url = self.writer(path, row["content"])
+                with self.db() as db:
                     db.execute("""UPDATE uploads SET published_digest=?,url=?,
                         state=CASE WHEN digest=? THEN 'uploaded' ELSE state END,
                         error=CASE WHEN digest=? THEN '' ELSE error END
                         WHERE session=? AND start=? AND end=?""",
-                        (row["digest"], url, row["digest"], row["digest"], row["session"], row["start"], row["end"]))
+                        (row["digest"],url,row["digest"],row["digest"],*identity))
+                    self.dirty.add(identity)
             except Exception:
-                with self.lock, self.db() as db:
+                with self.db() as db:
                     db.execute("""UPDATE uploads SET error='GitHub 暂时不可用，服务会自动重试',retry_at=?
                         WHERE session=? AND start=? AND end=? AND digest=?""",
-                        (self.clock() + self.retry_seconds, row["session"], row["start"], row["end"], row["digest"]))
+                        (self.clock()+self.retry_seconds,*identity,row["digest"]))
+                    self.dirty.add(identity)
+            self.metadata_wake.set()
         return True
+
+    def flush_metadata_once(self):
+        with self.lock:
+            identities = list(self.dirty)
+        for identity in identities:
+            with self.lock:
+                group_lock = self.group_locks.setdefault(identity, threading.Lock())
+            if not group_lock.acquire(blocking=False):
+                continue
+            try:
+                with self.db() as db:
+                    row = db.execute("SELECT * FROM uploads WHERE session=? AND start=? AND end=?", identity).fetchone()
+                    self.dirty.discard(identity)
+                    self.flushing_since = self.clock()
+                try:
+                    persist_record(self.data_dir, dict(row))
+                except Exception:
+                    with self.lock:
+                        self.dirty.add(identity)
+                    return False
+                return True
+            finally:
+                with self.lock:
+                    self.flushing_since = 0
+                group_lock.release()
+        return False
+
+    def metadata_worker(self):
+        while True:
+            if not self.flush_metadata_once():
+                self.metadata_wake.wait(5)
+                self.metadata_wake.clear()
+
+    def health(self):
+        with self.db() as db:
+            now = self.clock()
+            slow = sum(now-started > 20 for started in self.active_saves.values())
+            pending = db.execute("SELECT count(*) FROM uploads WHERE state='pending'").fetchone()[0]
+            metadata_slow = bool(self.flushing_since and now-self.flushing_since > 20)
+            return dict(status="degraded" if slow or metadata_slow else "ok", storage="durable-jsonl-v2",
+                        active_saves=len(self.active_saves), slow_saves=slow, pending_groups=pending,
+                        metadata_pending=len(self.dirty), metadata_slow=metadata_slow,
+                        destination=DESTINATION, round_id=ROUND)
 
     def worker(self):
         while True:
             if self.process_one():
                 time.sleep(15)
             else:
-                self.wake.wait(5)
+                self.wake.wait(2)
                 self.wake.clear()
 
 def handler(receiver, origins):
@@ -379,7 +555,8 @@ def handler(receiver, origins):
             try:
                 url = urlparse(self.path)
                 if url.path == "/health":
-                    return self.reply(200, {"status": "ok", "destination": DESTINATION, "round_id": ROUND})
+                    health = receiver.health()
+                    return self.reply(200 if health["status"] == "ok" else 503, health)
                 self.origin()
                 if url.path != "/api/status":
                     raise ReviewError("Not found", 404)
@@ -417,13 +594,17 @@ def handler(receiver, origins):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, required=True, help="Persistent private storage OUTSIDE the public checkout")
+    parser.add_argument("--runtime-dir", type=Path, help="Local filesystem directory for rebuildable locks")
     parser.add_argument("--port", type=int, default=7121)
     parser.add_argument("--origin", action="append", default=["https://jcheniu.github.io"])
     args = parser.parse_args()
     if args.data_dir.resolve().is_relative_to(ROOT):
         raise SystemExit("Private upload storage must be outside the public repository")
-    receiver = Receiver(args.data_dir)
+    if args.runtime_dir and args.runtime_dir.resolve().is_relative_to(ROOT):
+        raise SystemExit("Runtime locks must be outside the public repository")
+    receiver = Receiver(args.data_dir, runtime_dir=args.runtime_dir)
     threading.Thread(target=receiver.worker, daemon=True).start()
+    threading.Thread(target=receiver.metadata_worker, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(receiver, set(args.origin)))
     print("Review receiver listening on localhost; destination " + DESTINATION, flush=True)
     server.serve_forever()

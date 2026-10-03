@@ -1,7 +1,7 @@
 import copy,json,pathlib,sqlite3,sys,tempfile,unittest,uuid
 from unittest.mock import patch
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'server'))
-from receiver import Receiver,ReviewError,canonical,sha,github_write
+from receiver import Receiver,ReviewError,canonical,sha,github_write,migrate_database
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 
 class ReceiverTests(unittest.TestCase):
@@ -14,7 +14,7 @@ class ReceiverTests(unittest.TestCase):
         self.item=self.items[0]
         self.session=str(uuid.uuid4());self.key='a'*64
         self.body=self.body_for(25)
-    def tearDown(self):self.temp.cleanup()
+    def tearDown(self):self.service.close();self.temp.cleanup()
     def write(self,path,content):
         snapshot=self.service.snapshot_path(self.session,0,24)
         self.assertEqual(snapshot.read_text(),content,'Commit requires the durable JSONL snapshot')
@@ -32,6 +32,7 @@ class ReceiverTests(unittest.TestCase):
     def publish(self):
         self.now+=30
         self.assertTrue(self.service.process_one())
+        while self.service.flush_metadata_once(): pass
     def test_partial_is_durable_but_never_committed(self):
         r=self.service.submit(self.body_for(24),self.key)
         self.assertEqual((r['state'],r['count']),('draft',24))
@@ -103,6 +104,7 @@ class ReceiverTests(unittest.TestCase):
         def fail(*args):raise RuntimeError('upstream')
         self.service.writer=fail;self.publish()
         restored=Receiver(self.temp.name,writer=self.write,clock=lambda:self.now)
+        self.addCleanup(restored.close)
         self.assertEqual(restored.status(self.session,0,24,self.key)['state'],'pending')
         self.assertFalse(restored.process_one())
         self.now+=60
@@ -117,6 +119,7 @@ class ReceiverTests(unittest.TestCase):
     def test_existing_uploaded_full_groups_do_not_recommit_after_restart(self):
         self.service.submit(self.body,self.key);self.publish()
         restored=Receiver(self.temp.name,writer=self.write,clock=lambda:self.now)
+        self.addCleanup(restored.close)
         self.assertFalse(restored.process_one())
         self.assertEqual(restored.submit(self.body,self.key)['state'],'uploaded')
         self.assertEqual(len(self.writes),1)
@@ -128,7 +131,9 @@ class ReceiverTests(unittest.TestCase):
                 db.executescript('CREATE TABLE sessions(id TEXT PRIMARY KEY,key_hash TEXT);CREATE TABLE uploads(session TEXT,start INTEGER,end INTEGER,content TEXT,digest TEXT,state TEXT,url TEXT,error TEXT,updated REAL,PRIMARY KEY(session,start,end));')
                 db.execute('INSERT INTO sessions VALUES(?,?)',(self.session,sha(self.key)))
                 db.execute('INSERT INTO uploads VALUES(?,?,?,?,?,?,?,?,?)',(self.session,0,24,content,sha(content),'uploaded','https://github.com/old','',1))
+            migrate_database(pathlib.Path(directory)/'uploads.sqlite3',directory)
             restored=Receiver(directory,writer=lambda *_:self.fail('Legacy partial must not commit'),clock=lambda:self.now)
+            self.addCleanup(restored.close)
             self.assertEqual(restored.status(self.session,0,24,self.key)['state'],'draft')
             self.assertFalse(restored.process_one())
             self.assertEqual(restored.snapshot_path(self.session,0,24).read_text(),content)

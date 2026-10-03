@@ -1,73 +1,97 @@
 # Annotation receiver
 
-The service validates the fixed dataset and round, durably saves drafts and JSONL, and automatically
+The service validates the fixed dataset and round, durably saves private JSONL, and automatically
 commits only complete changed groups to result/round_1/<session UUID>/<start>_<end>.jsonl on main.
-
-The production receiver and signed KV supervisor are active. ENDPOINTS is bound to the dedicated
-cartoon-review-endpoints namespace; no process publishes service.json to GitHub.
 
 ## Run
 
-Use Python 3.10+, OpenSSL, and an already authenticated GitHub CLI with repository write access:
+Use Python 3.10+, OpenSSL, and an authenticated GitHub CLI with repository write access:
 
-    python server/run_service.py --data-dir "<persistent-private-directory>" --port 7121
+    python server/run_service.py --data-dir "<persistent-private-directory>" --runtime-dir "<local-runtime-directory>" --port 7121
 
-The directory must be outside the public checkout. It contains the SQLite database, private JSONL
-snapshots under jsonl/<session UUID>/, endpoint-signing.pem, endpoint.json, locks and service logs.
-The receiver listens only on 127.0.0.1. The supervisor starts a localhost.run SSH HTTPS tunnel
-and restarts failed children. Tunnel addresses are published to Cloudflare KV by signed POST requests,
-never by Git commits. See [edge deployment](../edge/README.md) before starting a fresh supervisor.
+Both directories must be outside the public checkout. The runtime directory must be on a local
+filesystem; network filesystems are rejected. It contains rebuildable process and Git writer locks.
+The data directory is persistent and private:
 
-Generate a signing key once in private storage, preserving an existing key:
+- jsonl/<session UUID>/<start>_<end>.jsonl: authoritative annotations, including incomplete drafts.
+- sessions/<session UUID>.json: hashed browser keys needed to restore access.
+- state/<session UUID>/<start>_<end>.json: queue, publication and retry metadata.
+- format.json: storage format version 2.
+- endpoint-signing.pem, endpoint.json and logs: signed tunnel discovery and diagnostics.
+
+The query index is SQLite entirely in memory. No running receiver opens a database, WAL, SHM or
+SQLite file lock on the network filesystem. Startup rebuilds the index from the persistent files.
+Temporary storage is never the sole copy of an acknowledged annotation or a session key.
+
+The receiver binds to 127.0.0.1. The supervisor keeps a localhost.run SSH HTTPS tunnel alive and
+publishes its address to Cloudflare KV using a signature. ENDPOINTS is bound to the dedicated
+cartoon-review-endpoints namespace. No address changes are committed to GitHub.
+
+Generate a signing key only for a fresh deployment, preserving existing keys:
 
     test -f "<persistent-private-directory>/endpoint-signing.pem" || (umask 077; openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "<persistent-private-directory>/endpoint-signing.pem")
     openssl pkey -in "<persistent-private-directory>/endpoint-signing.pem" -pubout -outform DER | base64 -w0
 
-The second command prints only the public verification key. For a fresh deployment, use that public key
-as PUBLIC_KEY in edge/worker.mjs. Keep the private key outside Git and back it up privately; never copy
-it to the browser or Cloudflare. Rotating it requires deploying the matching public key.
-
-The frontend uses https://api.asuperstrongfrog.com. GitHub credentials remain only on the SSH receiver.
-For your own stable proxy, run receiver.py directly and configure upload-config.json with that HTTPS URL.
-The production CORS origin is https://jcheniu.github.io. Local tests may explicitly add
---origin http://127.0.0.1:8000. Never put a GitHub access token in frontend configuration.
+The second command prints the public verification key for edge/worker.mjs. Keep the private key
+outside Git and backed up privately. See [edge deployment](../edge/README.md).
 
 ## Persistence and automatic commits
 
-- Every changed save is validated, atomically written to a private JSONL snapshot, fsynced, and recorded
-  in SQLite with FULL synchronous writes. Partial groups are drafts and never enter the Git publisher.
-- A group must contain exactly the 25 consecutive image numbers named by its range.
-- A first complete group enters the publisher immediately after its durable JSONL save. Edits to an
-  already published group wait 30 seconds after their last actual change; continuous edits are combined.
-  Successful writes remain paced at 15 seconds. Network failures can still delay completion.
-- The browser prioritizes complete groups, cancels obsolete snapshot requests and retry backoffs, and
-  sends new snapshots before polling publication. Publication polling never holds later groups in a loop.
-- Identical requests, timestamp/revision-only differences and returning to the previously published
-  content create no commits. The GitHub writer independently rejects partial files and service.json.
-- The writer uses the saved JSONL snapshot. Changes received during a write remain pending.
-  Failures retry after at least 60 seconds; retry state survives restart.
-- Startup preserves existing groups and keys, migrates old partial uploads to drafts, and does not
-  recommit already uploaded complete groups. Old public partial files are not deleted.
-- The browser retains offline annotations and retries when open or reopened. The browser's download
-  request cannot prove that its OS saved a file; the publication gate uses the fsynced server JSONL.
+Changed annotations are validated and atomically written to private JSONL, fsynced, then accompanied
+by durable queue metadata before the in-memory index exposes the new snapshot. Acknowledgement and
+publication follow durable storage. If a crash occurs between these writes, startup reconciles the
+newer JSONL with the older metadata and restores a pending group.
 
-Keep uploads.sqlite3, its WAL, private JSONL and the signing key in persistent storage. Use SQLite's
-backup API for consistent snapshots. Successful complete groups are additionally backed by Git history.
+Each group has its own nonblocking save lock. A stalled filesystem operation holds only that group;
+duplicate in-flight writes return a retryable response. Already saved identical requests and status
+checks read the in-memory index without filesystem I/O. The browser processes up to four independent
+groups concurrently, with separate retry delays. One complete group cannot starve the next.
 
-Each browser owns a 256-bit upload key, stored locally and hashed by the server. It grants access only
-to that session's namespace. Keys never appear in JSONL or GitHub. Session IDs do not verify identities.
-Inputs are size-limited; paths, hashes and row fields are validated. Rejected rows require color/pose
-reasons. Omitted rows are preserved, and older revisions from the same annotator are rejected.
+Exactly 25 consecutive saved image numbers are required for publication. The first complete group
+enters the publisher immediately. Edits to a previously published group use a 30-second quiet period.
+Successful writes are paced at 15 seconds. Duplicate content, timestamp-only changes and reverting to
+the already published content do not create commits. GitHub writes independently compare content.
 
-main contains source/data/results; gh-pages contains the website snapshot. Before pushing to main,
-acquire the exclusive flock on <persistent-private-directory>/github-write.lock, pull --ff-only,
-commit selected changes and push. Update gh-pages only for website releases.
+The publisher reads the immutable index snapshot installed after JSONL persistence. No network
+filesystem operation runs under the shared index lock or in the publication path. Publication
+metadata is flushed separately; if interrupted, GitHub content comparison avoids a duplicate commit
+during recovery. GitHub failures retry after at least 60 seconds while the process is running;
+successfully flushed retry metadata also survives restart.
+
+Health includes active/slow saves and pending groups. Saves or metadata flushes blocked for over
+20 seconds report degraded health instead of only reporting that the HTTP listener is alive.
+
+Each browser owns a 256-bit upload key. Only its hash is stored server-side. Keys never enter public
+JSONL or GitHub. CORS accepts https://jcheniu.github.io. For local tests, receiver.py accepts an explicit
+--origin http://127.0.0.1:8000. Never put a GitHub token in frontend configuration.
+
+## Migration and recovery
+
+Stop the old receiver before migration. Make a consistent backup of the legacy SQLite database,
+copy that backup to local storage, and keep the old database, WAL and existing JSONL as rollback evidence.
+Run the conversion against the local backup:
+
+    python server/migrate_storage.py --database "<local-consistent-backup.sqlite3>" --data-dir "<persistent-private-directory>"
+
+The converter preserves existing JSONL, session key hashes and publication metadata. It neither
+invokes the publisher nor writes to GitHub. It refuses to replace an existing version 2 store.
+A receiver encountering an unmigrated legacy database refuses to start.
+
+Back up the entire persistent directory privately, including sessions and state. Metadata writes
+may lag JSONL during a live copy; recovery deliberately accepts the newer durable JSONL. Restoring
+only GitHub results does not recover private browser keys or unfinished drafts.
+
+main contains source/data/results; gh-pages contains the website snapshot. Before a source push,
+acquire the flock on <local-runtime-directory>/github-write.lock, pull --ff-only, commit selected
+source changes and push. Update gh-pages only for website releases. User annotations are published
+only by the receiver's automatic worker.
 
 ## Test
 
-    python -m unittest discover -s tests -p "test_receiver.py" -v
+    python -m unittest discover -s tests -p "test_*.py" -v
     npm test
     npm run test:browser
 
-Tests use temporary databases, fake writers and intercepted browser uploads. They never publish
-synthetic training labels in the public results directory.
+Tests use temporary durable directories, fake publishers and intercepted browser uploads. They
+cover blocked storage, per-group isolation, recovery after interrupted writes and unchanged saves.
+They never publish synthetic labels to the production repository.
