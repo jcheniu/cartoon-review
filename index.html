@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="500 张动物与动漫脸图像的卡通风格候选标注。每组 25 张，自动导出 JSONL。">
+  <meta name="description" content="四轮宠物卡通图像标注，每轮 250 张、每组 25 张，自动导出 JSONL。">
   <title>卡通图像标注 · Cartoon Review</title>
-  <link rel="stylesheet" href="./assets/style.css">
+  <link rel="stylesheet" href="./assets/style.css?v=20261005-four-rounds">
 </head>
 <body>
 <header>
@@ -13,8 +13,10 @@
   <div class="header-links"><a href="./guide.html">操作说明 ↗</a><a href="https://github.com/jcheniu/cartoon-review" target="_blank" rel="noopener noreferrer">公开仓库 ↗</a></div>
 </header>
 <main>
-  <p class="storage-note">保存先保留草稿；满 25 张、JSONL 保存后首次立即提交到公开 GitHub result/round_1。已提交组的后续修改合并约 30 秒，每组标完自动下载 JSONL。</p>
+  <p class="storage-note">保存先保留草稿；满 25 张、JSONL 保存后首次立即提交到公开 GitHub <span id="round-destination">对应 round 目录</span>。已提交组的后续修改合并约 30 秒，每组标完自动下载 JSONL。</p>
+  <p id="round-summary"></p>
   <section class="toolbar">
+    <label>素材轮次<select id="round" aria-label="素材轮次"></select></label>
     <label>类别<select id="category"><option value="">全部输入</option><option value="animal">动物照片</option><option value="anime">动漫脸</option></select></label>
 
     <label>标注状态<select id="filter"><option value="pending">待标注</option><option value="all">全部</option><option value="reviewed">已标注</option></select></label>
@@ -57,9 +59,9 @@
   </section>
   <details class="source-details"><summary>查看输入来源与许可</summary><p id="provenance"></p><a id="source-link" target="_blank" rel="noopener noreferrer">打开来源页面 ↗</a> · <a href="./DATA_LICENSE.md">数据许可说明 ↗</a></details>
   <section class="snapshot"><h2>数据快照</h2><p id="snapshot"></p><p>候选是待评审的模型输出。新生成的候选由维护者更新到仓库后可见；当前页面不会启动 GPU 生成或训练。</p></section>
-  <footer>250 张真实猫狗照片 + 250 张 CC0 合成动漫脸。固定训练／验证／测试划分；后续训练只能使用训练集中人工通过的目标。代码 MIT；图片许可见逐图来源。</footer>
+  <footer>四轮共 1000 张宠物输入，包含实拍与高清插画。原有数据划分和标注保留；历史漫头已暂停。后续训练只能使用人工通过的训练目标。代码 MIT；图片许可见逐图来源。</footer>
 </main>
 <noscript>请启用 JavaScript 后使用标注工具。</noscript>
-<script type="module" src="./assets/app.mjs?v=20261003-isolated-groups"></script>
+<script type="module" src="./assets/app.mjs?v=20261005-four-rounds"></script>
 </body>
 </html>

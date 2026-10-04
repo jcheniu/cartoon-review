@@ -1,7 +1,11 @@
 # Annotation receiver
 
-The service validates the fixed dataset and round, durably saves private JSONL, and automatically
-commits only complete changed groups to result/round_1/<session UUID>/<start>_<end>.jsonl on main.
+The service validates each registered dataset and generation round, durably saves private JSONL, and automatically
+commits only complete changed groups to result/round_N/<session UUID>/<start>_<end>.jsonl on main.
+data/rounds.json registers rounds 1–4. The original round retains its existing private directory and keys;
+new rounds use isolated rounds/round_N subdirectories. All publishers share the same local Git lock.
+Requests carry the generation round_id; old clients can omit it for the legacy round. Round-specific
+source and candidate hashes are validated before any write.
 
 ## Run
 

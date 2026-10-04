@@ -48,12 +48,12 @@ def complete(content, start, end):
     rows = [json.loads(line) for line in content.splitlines() if line.strip()]
     return [row.get("image_number") for row in rows] == list(range(start, end + 1))
 
-def bounds(value):
+def bounds(value, total=500):
     if not isinstance(value, dict):
         raise ReviewError("Invalid group")
     start, end = value.get("start"), value.get("end")
-    if type(start) is not int or type(end) is not int or not 0 <= start <= 475 or end != start + 24:
-        raise ReviewError("A group must contain 25 consecutive indices in 0–499")
+    if type(start) is not int or type(end) is not int or not 0 <= start <= total - 25 or end != start + 24:
+        raise ReviewError(f"A group must contain 25 consecutive indices in 0–{total-1}")
     return start, end
 
 def validate_rows(manifest, records, start, end):
@@ -70,7 +70,7 @@ def validate_rows(manifest, records, start, end):
         if not start <= item["image_number"] <= end or item["id"] in seen:
             raise ReviewError("Duplicate or out-of-range review")
         seen.add(item["id"])
-        if (row.get("round_id") != ROUND or row.get("dataset_sha256") != manifest["dataset_sha256"]
+        if (row.get("round_id") != manifest["round"]["id"] or row.get("dataset_sha256") != manifest["dataset_sha256"]
                 or row.get("source_sha256") != item["sha256"]
                 or row.get("candidate_hashes") != {v: item["candidates"][v]["sha256"] for v in ("a", "b")}):
             raise ReviewError("Dataset, round or image hashes do not match")
@@ -102,13 +102,13 @@ def validate_rows(manifest, records, start, end):
         cleaned.append(dict(
             schema_version=1, dataset_sha256=manifest["dataset_sha256"],
             numbered_manifest_sha256=manifest["numbered_manifest_sha256"],
-            round_id=ROUND, annotation_session_id=session,
+            round_id=manifest["round"]["id"], annotation_session_id=session,
             item_id=item["legacy_id"], photo_id=item["id"], image_number=item["image_number"],
             category=item["category"], split=item["split"], group_id=item["group_id"],
             accepted=accepted, preferred=preferred, rejection_reasons=reasons,
             caption=caption.strip(), review_version=version, reviewed_at=reviewed,
             source_sha256=item["sha256"],
-            source=dict(path=item["path"], sha256=item["sha256"], license=item["license"], source_url=item["source_url"]),
+            source=dict(path=item["path"], sha256=item.get("preview_sha256",item["sha256"]), license=item["license"], source_url=item["source_url"], **({"original_sha256":item["sha256"]} if item.get("preview_sha256") else {})),
             candidates=item["candidates"], candidate_hashes={v: item["candidates"][v]["sha256"] for v in ("a", "b")},
             master_hashes=item.get("master_hashes", {}),
         ))
@@ -127,11 +127,12 @@ def github_json(method, endpoint, body=None):
     return json.loads(result.stdout) if result.stdout.strip() else {}
 
 def github_write(path, content):
-    match = re.fullmatch(re.escape(DESTINATION) + r"/(" + UUID.pattern[1:-1] + r")/(\d{3})_(\d{3})\.jsonl", path)
+    match = re.fullmatch(r"result/round_([1-4])/(" + UUID.pattern[1:-1] + r")/(\d{3})_(\d{3})\.jsonl", path)
     if not match:
         raise ValueError("Only review JSONL files may be committed")
-    start, end = map(int, match.groups()[1:])
-    bounds(dict(start=start, end=end))
+    round_number = int(match.group(1))
+    start, end = map(int, match.groups()[2:])
+    bounds(dict(start=start, end=end), 500 if round_number == 1 else 250)
     if not complete(content, start, end):
         raise ValueError("Only complete 25-row groups may be committed")
     for attempt in range(3):
@@ -141,7 +142,7 @@ def github_write(path, content):
             previous = base64.b64decode(old.get("content", "")).decode()
             if previous == content or annotation_digest(previous) == annotation_digest(content):
                 return old["html_url"]
-        body = dict(message="Save completed round 1 review group " + path.rsplit("/", 1)[-1], content=encoded, branch=BRANCH,
+        body = dict(message=f"Save completed round {round_number} review group " + path.rsplit("/", 1)[-1], content=encoded, branch=BRANCH,
                     author=dict(name="Jing", email="jcheniu@connect.ust.hk"))
         if old:
             body["sha"] = old["sha"]
@@ -227,7 +228,7 @@ def migrate_database(database, directory):
 
 class Receiver:
     def __init__(self, data_dir, manifest_path=ROOT / "data/manifest.json", writer=github_write,
-                 clock=time.time, quiet_seconds=30, retry_seconds=60, runtime_dir=None):
+                 clock=time.time, quiet_seconds=30, retry_seconds=60, runtime_dir=None, destination=DESTINATION):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.data_dir, 0o700)
@@ -236,6 +237,11 @@ class Receiver:
         self.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         ensure_local_runtime(self.runtime_dir)
         self.manifest = json.loads(Path(manifest_path).read_text())
+        if not re.fullmatch(r"result/round_[1-4]", destination):
+            raise ValueError("Invalid server-configured destination")
+        self.destination = destination
+        self.round_id = self.manifest["round"]["id"]
+        self.total = len(self.manifest["items"])
         self.writer = writer
         self.clock, self.quiet_seconds, self.retry_seconds = clock, quiet_seconds, retry_seconds
         self.wake, self.metadata_wake = threading.Event(), threading.Event()
@@ -273,7 +279,7 @@ class Receiver:
                 if not db.execute("SELECT 1 FROM sessions WHERE id=?", (session,)).fetchone():
                     raise RuntimeError("Durable group is missing its session key")
                 start, end = map(int, match.groups())
-                bounds(dict(start=start, end=end))
+                bounds(dict(start=start, end=end), self.total)
                 content = path.read_text()
                 parsed = [json.loads(line) for line in content.splitlines() if line.strip()]
                 cleaned = validate_rows(self.manifest, parsed, start, end)
@@ -354,8 +360,10 @@ class Receiver:
     def submit(self, body, key, ip="local"):
         if not isinstance(body, dict):
             raise ReviewError("Invalid request")
+        if body.get("round_id", self.round_id) != self.round_id:
+            raise ReviewError("Wrong round")
         session = body.get("session_id")
-        start, end = bounds(body.get("range"))
+        start, end = bounds(body.get("range"), self.total)
         records = validate_rows(self.manifest, body.get("records"), start, end)
         self.ensure_session(session, key)
         identity = (session, start, end)
@@ -415,8 +423,10 @@ class Receiver:
                 self.active_saves.pop(identity, None)
             group_lock.release()
 
-    def status(self, session, start, end, key):
-        bounds(dict(start=start, end=end))
+    def status(self, session, start, end, key, round_id=None):
+        if round_id is not None and round_id != self.round_id:
+            raise ReviewError("Wrong round")
+        bounds(dict(start=start, end=end), self.total)
         with self.db() as db:
             self.authenticate(db, session, key)
             row = db.execute("SELECT * FROM uploads WHERE session=? AND start=? AND end=?", (session,start,end)).fetchone()
@@ -425,7 +435,7 @@ class Receiver:
             return dict(state=row["state"], digest=row["digest"], url=row["url"],
                         count=len(row["content"].splitlines()), error=row["error"],
                         ready_at=max(row["updated"] + (self.quiet_seconds if row["published_digest"] else 0), row["retry_at"]),
-                        path=f"{DESTINATION}/{session}/{start:03d}_{end:03d}.jsonl")
+                        path=f"{self.destination}/{session}/{start:03d}_{end:03d}.jsonl")
 
     def process_one(self):
         with (self.runtime_dir / "github-write.lock").open("a") as lock:
@@ -448,7 +458,7 @@ class Receiver:
                     self.dirty.add(identity)
                     self.metadata_wake.set()
                     return False
-            path = f"{DESTINATION}/{row['session']}/{row['start']:03d}_{row['end']:03d}.jsonl"
+            path = f"{self.destination}/{row['session']}/{row['start']:03d}_{row['end']:03d}.jsonl"
             try:
                 # The immutable index row is installed only after its JSONL has been fsynced.
                 url = self.writer(path, row["content"])
@@ -509,7 +519,7 @@ class Receiver:
             return dict(status="degraded" if slow or metadata_slow else "ok", storage="durable-jsonl-v2",
                         active_saves=len(self.active_saves), slow_saves=slow, pending_groups=pending,
                         metadata_pending=len(self.dirty), metadata_slow=metadata_slow,
-                        destination=DESTINATION, round_id=ROUND)
+                        destination=self.destination, round_id=self.round_id)
 
     def worker(self):
         while True:
@@ -518,6 +528,32 @@ class Receiver:
             else:
                 self.wake.wait(2)
                 self.wake.clear()
+
+
+class CollectionReceiver:
+    """Route each known round to its own durable store; legacy storage stays in place."""
+    def __init__(self, receivers):
+        self.receivers = {receiver.round_id: receiver for receiver in receivers}
+        if len(self.receivers) != len(receivers):
+            raise ValueError("Duplicate generation round")
+    def select(self, round_id):
+        selected = self.receivers.get(round_id)
+        if selected is None:
+            raise ReviewError("Unknown round", 400)
+        return selected
+    def submit(self, body, key, ip="local"):
+        if not isinstance(body, dict):
+            raise ReviewError("Invalid request")
+        records = body.get("records")
+        inferred = records[0].get("round_id", ROUND) if isinstance(records, list) and records and isinstance(records[0], dict) else ROUND
+        return self.select(body.get("round_id", inferred)).submit(body, key, ip)
+    def status(self, session, start, end, key, round_id=ROUND):
+        return self.select(round_id).status(session, start, end, key, round_id)
+    def health(self):
+        rounds = [receiver.health() for receiver in self.receivers.values()]
+        return dict(status="ok" if all(r["status"] == "ok" for r in rounds) else "degraded",
+                    storage="durable-jsonl-v2", round_id=ROUND, rounds=rounds)
+
 
 def handler(receiver, origins):
     class Handler(BaseHTTPRequestHandler):
@@ -561,7 +597,7 @@ def handler(receiver, origins):
                 if url.path != "/api/status":
                     raise ReviewError("Not found", 404)
                 q = parse_qs(url.query)
-                result = receiver.status(q["session"][0], int(q["start"][0]), int(q["end"][0]), self.headers.get("X-Upload-Key", ""))
+                result = receiver.status(q["session"][0], int(q["start"][0]), int(q["end"][0]), self.headers.get("X-Upload-Key", ""), round_id=q.get("round_id", [ROUND])[0])
                 self.reply(200, result)
             except (KeyError, ValueError):
                 self.reply(400, {"error": "Invalid request"})
@@ -602,9 +638,26 @@ def main():
         raise SystemExit("Private upload storage must be outside the public repository")
     if args.runtime_dir and args.runtime_dir.resolve().is_relative_to(ROOT):
         raise SystemExit("Runtime locks must be outside the public repository")
-    receiver = Receiver(args.data_dir, runtime_dir=args.runtime_dir)
-    threading.Thread(target=receiver.worker, daemon=True).start()
-    threading.Thread(target=receiver.metadata_worker, daemon=True).start()
+    receivers = [Receiver(args.data_dir, runtime_dir=args.runtime_dir)]
+    catalog_path = ROOT / "data/rounds.json"
+    if catalog_path.exists():
+        for entry in json.loads(catalog_path.read_text())["rounds"]:
+            if entry["id"] == "round_1":
+                continue
+            if not re.fullmatch(r"round_[2-4]", entry["id"]):
+                raise ValueError("Unexpected public collection")
+            manifest_path = (ROOT / entry["manifest"]).resolve()
+            if not manifest_path.is_relative_to(ROOT / "data"):
+                raise ValueError("Manifest escapes public data")
+            child = Receiver(args.data_dir / "rounds" / entry["id"], manifest_path=manifest_path,
+                             runtime_dir=args.runtime_dir, destination="result/" + entry["id"])
+            if child.round_id != entry["round_id"]:
+                raise ValueError("Collection/generation round mismatch")
+            receivers.append(child)
+    for child in receivers:
+        threading.Thread(target=child.worker, daemon=True).start()
+        threading.Thread(target=child.metadata_worker, daemon=True).start()
+    receiver = CollectionReceiver(receivers)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), handler(receiver, set(args.origin)))
     print("Review receiver listening on localhost; destination " + DESTINATION, flush=True)
     server.serve_forever()

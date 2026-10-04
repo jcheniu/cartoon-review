@@ -62,3 +62,13 @@ test('unchanged user choices preserve the original revision and timestamp', () =
   const edited = makeReview(manifest, item, {...form, caption: 'a different cartoon subject'}, previous, 'session');
   assert.equal(edited.review_version, previous.review_version + 1);
 });
+
+
+test('resized source preview hashes remain distinct from the training original', () => {
+  const preview = {...item, preview_sha256: 'd'.repeat(64)};
+  const row = makeReview(manifest, preview, form, null, 'test-session');
+  assert.equal(row.source_sha256, item.sha256);
+  assert.equal(row.source.sha256, preview.preview_sha256);
+  assert.equal(row.source.original_sha256, item.sha256);
+  assert.equal('original_sha256' in make({}).source, false, 'Legacy records remain unchanged');
+});

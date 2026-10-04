@@ -38,7 +38,7 @@ export function makeReview(manifest, item, form, previous, session) {
     accepted, preferred, rejection_reasons: reasons,
     caption,
     source_sha256: item.sha256,
-    source: {path: item.path, sha256: item.sha256, license: item.license, source_url: item.source_url},
+    source: {path: item.path, sha256: item.preview_sha256 || item.sha256, ...(item.preview_sha256 ? {original_sha256: item.sha256} : {}), license: item.license, source_url: item.source_url},
     candidate_hashes: {a: item.candidates.a.sha256, b: item.candidates.b.sha256},
     master_hashes: item.master_hashes,
     candidates: item.candidates,

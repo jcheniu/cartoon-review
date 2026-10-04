@@ -2,7 +2,7 @@
 
 UTF-8; one JSON object per line, with a trailing newline. Rows are sorted by image_number.
 The group filename uses three-digit inclusive bounds, e.g. 000_024.jsonl or 450_474.jsonl.
-Manual exports can contain fewer than 25 rows. New automatic GitHub commits require all 25 rows, a durable server JSONL snapshot, and changed annotation content. The first complete group is queued immediately; edits to an already published group use a 30-second quiet period. Files use result/round_1/<upload-session>/<start>_<end>.jsonl on main. Earlier partial files remain as historical annotations.
+Manual exports can contain fewer than 25 rows. New automatic GitHub commits require all 25 rows, a durable server JSONL snapshot, and changed annotation content. The first complete group is queued immediately; edits to an already published group use a 30-second quiet period. Files use result/round_N/<upload-session>/<start>_<end>.jsonl on main, where N is the selected round (1–4). Earlier partial files remain as historical annotations.
 
 | Field | Meaning |
 | --- | --- |
@@ -35,3 +35,4 @@ Hash metadata allows the data owner to link public judgments to private masters;
 and does not authenticate a reviewer. Nothing in this repository runs training automatically.
 
 The removed notes field is not included in new exports or server uploads. Fixed split metadata is retained even though the UI no longer filters by split. The upload-session directory isolates browser owners; imported records may retain their original annotation_session_id.\n
+新增 round_2–4 的网页原图为缩小浏览副本：顶层 source_sha256 始终指向高清原文件；source.sha256 校验 source.path 对应的浏览副本，source.original_sha256 再次记录高清原文件哈希。旧轮次 source 字段保持原格式不变。必须通过 round_id 与 dataset_sha256 共同定位数据，不能只按 000 等编号合并不同轮次。

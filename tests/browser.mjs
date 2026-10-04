@@ -20,12 +20,12 @@ try {
     return route.fulfill({headers, json: {state: body.records.length === 25 ? 'pending' : 'draft', count: body.records.length, ready_at: Date.now()/1000 + 30, digest: 'test', url: ''}});
   });
   await page.goto(url);
-  await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('/ 500'));
+  await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('/ 250'));
   assert.deepEqual(await page.locator('.images .card-title strong').allTextContents(), ['候选 A', '候选 B', '输入原图']);
   assert.equal(await page.locator('#split, #notes, #export-all').count(), 0);
   await page.waitForFunction(() => document.querySelector('#upload-state').textContent.includes('自动上传已连接'));
   const manifest = await page.evaluate(async () => (await fetch('./data/manifest.json')).json());
-  const group = Array.from({length: 20}, (_, i) => i * 25).find(start => manifest.items.slice(start, start + 25).every(item => item.candidates));
+  const group = Array.from({length: 10}, (_, i) => i * 25).find(start => manifest.items.slice(start, start + 25).every(item => item.candidates));
   assert.notEqual(group, undefined, 'Browser export test requires one complete group of real candidates');
   const range = group + '-' + (group + 24);
   const filename = String(group).padStart(3, '0') + '_' + String(group + 24).padStart(3, '0') + '.jsonl';
@@ -37,7 +37,7 @@ try {
   await page.locator('[value="color"]').check();
   await page.locator('[value="pose"]').check();
   await page.locator('#save').click();
-  assert.match(await page.locator('#progress').textContent(), /1 \/ 500/);
+  assert.match(await page.locator('#progress').textContent(), /1 \/ 250/);
   const partialDownload = page.waitForEvent('download');
   await page.locator('#export-now').click();
   const partial = await partialDownload;
@@ -52,7 +52,7 @@ try {
   assert.equal(uploads[0].records[0].accepted, 'neither');
   assert.equal('notes' in uploads[0].records[0], false);
   await page.reload();
-  await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('1 / 500'));
+  await page.waitForFunction(() => document.querySelector('#progress').textContent.includes('1 / 250'));
   let completed;
   for (let i = 1; i < 25; i++) {
     await page.locator('[data-choice="a"]').click();
@@ -99,9 +99,9 @@ try {
   await page.locator('#import').setInputFiles({name: filename, mimeType: 'application/x-ndjson', buffer: Buffer.from(partialText)});
   await page.waitForFunction(() => document.querySelector('#message').textContent.includes('已导入'));
   assert.equal(await page.evaluate(({key, id}) => JSON.parse(localStorage.getItem(key)).reviews[id].accepted, {key, id: first.photo_id}), 'neither');
-  await page.locator('#range').fill('450-474');
+  await page.locator('#range').fill('225-249');
   await page.locator('#apply-range').click();
-  assert.match(await page.locator('#item-title').textContent(), /^450/);
+  assert.match(await page.locator('#item-title').textContent(), /^225/);
   const missing = manifest.items.find(item => !item.candidates);
   if (missing) {
     const start = Math.min(missing.image_number, 475);

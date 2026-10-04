@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "rounds": [
+    {
+      "id": "round_1",
+      "label": "Round 1 · 原有宠物",
+      "count": 250,
+      "manifest": "data/manifest.json",
+      "round_id": "round-20260930T231132-d69c0f",
+      "ready": 250
+    },
+    {
+      "id": "round_2",
+      "label": "Round 2 · 新增宠物",
+      "count": 250,
+      "manifest": "data/round_2/manifest.json",
+      "round_id": "round-20261004T222724-f4d021",
+      "ready": 250
+    },
+    {
+      "id": "round_3",
+      "label": "Round 3 · 新增宠物",
+      "count": 250,
+      "manifest": "data/round_3/manifest.json",
+      "round_id": "round-20261004T222724-11eb4f",
+      "ready": 250
+    },
+    {
+      "id": "round_4",
+      "label": "Round 4 · 新增宠物",
+      "count": 250,
+      "manifest": "data/round_4/manifest.json",
+      "round_id": "round-20261004T222724-cd4e24",
+      "ready": 250
+    }
+  ]
+}

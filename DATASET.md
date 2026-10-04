@@ -45,4 +45,9 @@ Incomplete pairs are represented by a null candidates field; no placeholder is c
 
 The package includes 500 selected original inputs, available 256px A/B pairs and public provenance.
 Private historical teacher labels, training masters, adapters, model caches and connection metadata are excluded.
-Public-web annotations are uploaded under result/round_1 with the operator-facing upload notice.\nSession identifiers are random browser identifiers, not verified personal identities.
+Public-web annotations are uploaded under the selected result/round_N directory with the operator-facing upload notice.
+Session identifiers are random browser identifiers, not verified personal identities.
+
+## 2026-10-05 宠物扩充
+
+公开入口展示四个宠物 round，每轮 250 张。原 data/manifest.json 及其 500 张历史输入不改写；round_1 默认只展示其中 250 张宠物，archive=1 可查看完整历史。新增 round_2–4 使用现有宠物 LoRA 和 SDXL+Canny 生成 A/B，每轮 250 对。741 张照片与 9 张插画的高清来源已核验和备份；网页提供 1024 像素以内的等比浏览图，每个副本单独记录哈希。四轮目录位于 data/rounds.json，新轮不会复用旧轮的上传目录或浏览器标注键。

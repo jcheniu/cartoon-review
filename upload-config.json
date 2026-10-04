@@ -1,4 +1,10 @@
 {
   "endpoint": "https://api.asuperstrongfrog.com",
-  "round_id": "round-20260930T231132-d69c0f"
+  "round_id": "round-20260930T231132-d69c0f",
+  "round_ids": [
+    "round-20260930T231132-d69c0f",
+    "round-20261004T222724-f4d021",
+    "round-20261004T222724-11eb4f",
+    "round-20261004T222724-cd4e24"
+  ]
 }

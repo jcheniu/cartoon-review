@@ -1,4 +1,4 @@
-import {rangeRows, rangeName} from './review.mjs';
+import {rangeRows, rangeName} from './review.mjs?v=20261005-four-rounds';
 
 class Superseded extends Error {}
 function pause(ms, signal) {
@@ -17,7 +17,7 @@ export async function createUploader({manifest, getState, onStatus}) {
   const response = await fetch(new URL('../upload-config.json', import.meta.url), {cache: 'no-store'});
   if (!response.ok) throw Error('上传配置暂时不可用');
   const config = await response.json();
-  if (!config.endpoint || config.round_id !== manifest.round.id) throw Error('本轮上传服务尚未配置');
+  if (!config.endpoint || !(config.round_id === manifest.round.id || config.round_ids?.includes(manifest.round.id))) throw Error('本轮上传服务尚未配置');
   const endpoint = new URL(config.endpoint);
   if (endpoint.protocol !== 'https:') throw Error('上传服务必须使用 HTTPS');
   const session = getState().session;
@@ -90,12 +90,12 @@ export async function createUploader({manifest, getState, onStatus}) {
         meta.pending[name] = currentSignature;
         persist();
         notify('正在保存 ' + name + '（' + rows.length + '/25）…');
-        result = await request('/api/reviews', {session_id: session, range, records: rows}, controller.signal);
+        result = await request('/api/reviews', {session_id: session, round_id: manifest.round.id, range, records: rows}, controller.signal);
         meta.saved[name] = currentSignature;
         delete meta.pending[name];
         persist();
       } else {
-        result = await request('/api/status?session=' + session + '&start=' + range.start + '&end=' + range.end,
+        result = await request('/api/status?session=' + session + '&start=' + range.start + '&end=' + range.end + '&round_id=' + encodeURIComponent(manifest.round.id),
           undefined, controller.signal);
       }
       if (rows.length < 25) {

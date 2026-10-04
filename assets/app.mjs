@@ -1,12 +1,12 @@
-import {createUploader} from './upload.mjs?v=20261003-isolated-groups';
-import {parseRange, shiftRange} from './ranges.mjs';
-import {pad, rangeName, choiceOf, makeReview, validateImported, rangeRows} from './review.mjs';
+import {createUploader} from './upload.mjs?v=20261005-four-rounds';
+import {parseRange, shiftRange} from './ranges.mjs?v=20261005-four-rounds';
+import {pad, rangeName, choiceOf, makeReview, validateImported, rangeRows} from './review.mjs?v=20261005-four-rounds';
 
 const $ = selector => document.querySelector(selector);
 const choices = [...document.querySelectorAll('[data-choice]')];
 const reasonInputs = [...document.querySelectorAll('[name="rejection-reason"]')];
 let storedSnapshot = null, uploader = null;
-let manifest, storageKey, state, range = {start: 0, end: 24}, visible = [], index = 0, choice = null;
+let manifest, activeRound, viewItems, total, storageKey, state, range = {start: 0, end: 24}, visible = [], index = 0, choice = null;
 
 function message(text, error = false) {
   $('#message').textContent = text;
@@ -64,14 +64,14 @@ function renderItem() {
   $('#prev').disabled = index <= 0;
   $('#next').disabled = index >= visible.length - 1;
   $('#prev-group').disabled = range.start === 0;
-  $('#next-group').disabled = range.end === 499;
+  $('#next-group').disabled = range.end === total - 1;
   const review = item && hasValidReview(item) ? state.reviews[item.id] : null;
   choice = choiceOf(review);
   $('#caption').value = review?.caption ?? item?.caption ?? '';
   $('#preferred').value = review?.preferred === 'b' ? 'b' : review?.preferred === 'tie' ? 'tie' : 'a';
   reasonInputs.forEach(input => { input.checked = (review?.rejection_reasons || []).includes(input.value); });
   $('#caption').disabled = !item?.candidates;
-  $('#badge').textContent = item ? (item.category === 'animal' ? '动物照片' : '动漫脸') : '本组';
+  $('#badge').textContent = item ? (item.category === 'animal' ? (item.media_type === 'illustration' ? '宠物插画' : '宠物照片') : '历史动漫脸') : '本组';
   $('#item-title').textContent = item ? pad(item.image_number) + (item.candidates ? '' : ' · 候选待生成') : '当前筛选下没有图片';
   $('#position').textContent = item ? (index + 1) + ' / ' + visible.length : '可切换“全部”或下一组';
   $('#dimensions').textContent = item ? item.width + '×' + item.height : '';
@@ -85,21 +85,21 @@ function renderItem() {
   updateChoices();
 }
 function refresh(preferredId) {
-  const members = manifest.items.filter(item => item.image_number >= range.start && item.image_number <= range.end);
+  const members = viewItems.filter(item => item.image_number >= range.start && item.image_number <= range.end);
   visible = members.filter(item =>
     (!$('#category').value || item.category === $('#category').value) &&
     ($('#filter').value === 'all' || ($('#filter').value === 'reviewed' ? hasValidReview(item) : !hasValidReview(item))));
   index = Math.max(0, visible.findIndex(item => item.id === preferredId));
   const done = members.filter(hasValidReview).length;
-  $('#progress').textContent = Object.keys(state.reviews).length + ' / 500 已标注';
-  $('#dataset').textContent = manifest.ready + ' / 500 张候选就绪';
+  $('#progress').textContent = viewItems.filter(hasValidReview).length + ' / ' + total + ' 已标注';
+  $('#dataset').textContent = viewItems.filter(item => item.candidates).length + ' / ' + total + ' 张候选就绪';
   $('#batch-progress').textContent = pad(range.start) + '–' + pad(range.end) + ' · 已标 ' + done + '/25 · 候选 ' + members.filter(x => x.candidates).length + '/25';
-  $('#snapshot').textContent = '轮次 ' + manifest.round.id + '；发布快照 ' + new Date(manifest.generated_at).toLocaleString() + '。';
+  $('#snapshot').textContent = activeRound.label + '；生成轮次 ' + manifest.round.id + '；发布快照 ' + new Date(manifest.generated_at).toLocaleString() + '。';
   renderItem();
 }
 function applyRange(value) {
   try {
-    range = parseRange(value);
+    range = parseRange(value, total);
     $('#range').value = range.start + '-' + range.end;
     const url = new URL(location.href);
     url.searchParams.set('range', range.start + '-' + range.end);
@@ -168,9 +168,37 @@ async function importFile(event) {
 }
 
 async function start() {
-  const response = await fetch(new URL('../data/manifest.json', import.meta.url), {cache: 'no-cache'});
+  const params = new URL(location.href).searchParams;
+  const catalogResponse = await fetch(new URL('../data/rounds.json', import.meta.url), {cache: 'no-cache'});
+  if (!catalogResponse.ok) throw Error('轮次目录读取失败：' + catalogResponse.status);
+  const catalog = await catalogResponse.json();
+  activeRound = catalog.rounds.find(round => round.id === (params.get('round') || 'round_1'));
+  if (!activeRound) throw Error('标注链接中的 round 不存在。');
+  for (const round of catalog.rounds) {
+    const option = document.createElement('option');
+    option.value = round.id;
+    option.textContent = round.label + ' · ' + round.ready + '/' + round.count + ' 对就绪';
+    $('#round').append(option);
+  }
+  $('#round').value = activeRound.id;
+  $('#round').addEventListener('change', () => {
+    const next = new URL(location.href);
+    next.searchParams.set('round', $('#round').value);
+    next.searchParams.set('range', '0-24');
+    next.searchParams.delete('archive');
+    location.assign(next);
+  });
+  const response = await fetch(new URL(activeRound.manifest, document.baseURI), {cache: 'no-cache'});
   if (!response.ok) throw Error('数据清单读取失败：' + response.status);
   manifest = await response.json();
+  if (manifest.round.id !== activeRound.round_id) throw Error('轮次目录与数据清单不匹配，请刷新。');
+  const archive = activeRound.id === 'round_1' && params.get('archive') === '1';
+  viewItems = archive ? manifest.items : manifest.items.slice(0, activeRound.count);
+  total = viewItems.length;
+  $('#category').parentElement.hidden = !archive;
+  $('#range').placeholder = '0-24 或 ' + (total-25) + '-' + (total-1);
+  $('#round-destination').textContent = 'result/' + activeRound.id;
+  $('#round-summary').textContent = activeRound.label + '，共 ' + total + ' 张。各 round 的标注、草稿与上传目录互相独立。';
   storageKey = 'cartoon-review:' + manifest.dataset_sha256 + ':' + manifest.round.id;
   const raw = localStorage.getItem(storageKey);
   storedSnapshot = raw;
@@ -189,7 +217,7 @@ async function start() {
   }
   const queryRange = new URL(location.href).searchParams.get('range');
   if (queryRange) {
-    try { range = parseRange(queryRange); $('#range').value = range.start + '-' + range.end; }
+    try { range = parseRange(queryRange, total); $('#range').value = range.start + '-' + range.end; }
     catch { message('链接中的范围无效，已使用 0-24。', true); }
   }
   for (const id of ['category', 'filter']) $('#' + id).addEventListener('change', () => refresh());
@@ -200,7 +228,7 @@ async function start() {
   $('#apply-range').addEventListener('click', () => applyRange($('#range').value));
   $('#range').addEventListener('keydown', event => { if (event.key === 'Enter') applyRange($('#range').value); });
   for (const [id, delta] of [['prev-group', -1], ['next-group', 1]]) {
-    $('#' + id).addEventListener('click', () => { const next = shiftRange(range, delta); applyRange(next.start + '-' + next.end); });
+    $('#' + id).addEventListener('click', () => { const next = shiftRange(range, delta, total); applyRange(next.start + '-' + next.end); });
   }
   $('#export-now').addEventListener('click', () => {
     try { download(rangeRows(state.reviews, range), rangeName(range)); message('已发起本组 JSONL 下载。'); }
